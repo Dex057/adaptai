@@ -24,6 +24,7 @@ from app.core.pagination import PaginationParams, build_page
 from app.models.user import User
 from app.models.student import Student
 from app.models.relatorio import Relatorio
+from app.core.tenant import enforce_limite_relatorios
 from app.schemas.relatorio import (
     RelatorioCreate,
     RelatorioUpdate,
@@ -492,7 +493,9 @@ async def upload_e_analisar_relatorio(
     Retorna IMEDIATAMENTE após salvar o arquivo.
     A análise com IA acontece em background.
     """
-    
+    # Limite de plano (soft): bloqueia se a escola atingiu o limite mensal de relatorios.
+    enforce_limite_relatorios(db, current_user)
+
     # Verificar se aluno existe
     student = db.query(Student).filter(Student.id == student_id).first()
     if not student:
@@ -666,6 +669,8 @@ async def upload_e_analisar_rapido(
     - Conecte no WebSocket: ws://host/api/v1/ws?token=JWT
     - Escute mensagens: { type: 'relatorio_progress', relatorio_id, stage, progress, data }
     """
+    # Limite de plano (soft): bloqueia se a escola atingiu o limite mensal de relatorios.
+    enforce_limite_relatorios(db, current_user)
 
     # Verificar aluno
     student = db.query(Student).filter(Student.id == student_id).first()

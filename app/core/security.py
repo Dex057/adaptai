@@ -14,6 +14,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 from jose import JWTError, jwt
 import bcrypt
+import hashlib
+import hmac
 from app.core.config import settings
 
 
@@ -94,5 +96,44 @@ def decode_refresh_token(token: str) -> Optional[dict]:
     if not payload:
         return None
     if payload.get("type") != "refresh":
+        return None
+    return payload
+
+
+# ============================================
+# PASSWORD RESET (recuperacao de senha)
+# ============================================
+# Token de reset stateless (JWT) com claim type='password_reset'. Para dar
+# comportamento de USO UNICO sem tabela no banco, embutimos um fingerprint
+# derivado do hash atual da senha: quando a senha muda, o fingerprint muda e
+# qualquer token de reset antigo deixa de validar.
+
+PASSWORD_RESET_EXPIRE_MINUTES = 30
+
+
+def password_reset_fingerprint(hashed_password: str) -> str:
+    """Fingerprint curto e estavel do hash atual da senha (HMAC com SECRET_KEY)."""
+    return hmac.new(
+        settings.SECRET_KEY.encode("utf-8"),
+        hashed_password.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()[:16]
+
+
+def create_password_reset_token(
+    email: str, fingerprint: str, expires_minutes: int = PASSWORD_RESET_EXPIRE_MINUTES
+) -> str:
+    """Cria token JWT de redefinicao de senha (curta duracao, uso unico via fingerprint)."""
+    expire = datetime.now(timezone.utc) + timedelta(minutes=expires_minutes)
+    to_encode = {"sub": email, "type": "password_reset", "fp": fingerprint, "exp": expire}
+    return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+
+
+def decode_password_reset_token(token: str) -> Optional[dict]:
+    """Decodifica e valida que o token e do tipo 'password_reset'. None se invalido."""
+    payload = decode_access_token(token)
+    if not payload:
+        return None
+    if payload.get("type") != "password_reset":
         return None
     return payload

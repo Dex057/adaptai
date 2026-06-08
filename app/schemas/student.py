@@ -30,6 +30,8 @@ class StudentResponse(StudentBase):
     diagnosis: Optional[Dict] = None
     profile_data: Optional[Dict] = None
     notes: Optional[str] = None
+    is_active: bool = True
+    foto_path: Optional[str] = None
     created_by_user_id: int
     created_at: datetime
     updated_at: Optional[datetime] = None
@@ -43,6 +45,8 @@ class StudentListResponse(BaseModel):
     email: Optional[str] = None
     grade_level: str
     diagnosis: Optional[Dict] = None
+    is_active: bool = True
+    foto_path: Optional[str] = None
     created_at: datetime
     
     class Config:

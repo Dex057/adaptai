@@ -86,7 +86,75 @@ class RedacaoAIService:
         (40, "Precário"),
         (0, "Zero")
     ]
-    
+
+    # Descritores (resumidos) de cada nivel (0-200) por competencia, conforme a
+    # matriz de referencia do ENEM. Usados para montar a rubrica detalhada.
+    RUBRICA_NIVEIS = {
+        1: {
+            200: "Excelente dominio da norma culta, com no maximo desvios eventuais.",
+            160: "Bom dominio da norma culta, com poucos desvios gramaticais e de convencoes.",
+            120: "Dominio mediano da norma culta, com alguns desvios.",
+            80: "Dominio insuficiente da norma culta, com muitos desvios.",
+            40: "Dominio precario da norma culta, com desvios sistematicos e frequentes.",
+            0: "Desconhecimento da norma culta.",
+        },
+        2: {
+            200: "Desenvolve o tema com repertorio produtivo e estrutura dissertativo-argumentativa completa.",
+            160: "Desenvolve o tema com repertorio pertinente e estrutura completa.",
+            120: "Desenvolve o tema de forma mediana, com repertorio baseado nos textos motivadores.",
+            80: "Desenvolve o tema de forma tangencial ou com dominio insuficiente do tipo textual.",
+            40: "Tangencia o tema ou apresenta tracos de outros tipos textuais.",
+            0: "Fuga ao tema ou nao atendimento a estrutura dissertativo-argumentativa.",
+        },
+        3: {
+            200: "Argumentos consistentes e bem organizados, com autoria clara na defesa do ponto de vista.",
+            160: "Argumentos consistentes, com organizacao adequada das ideias.",
+            120: "Argumentacao previsivel, com organizacao mediana.",
+            80: "Argumentacao fragil, com ideias pouco desenvolvidas.",
+            40: "Informacoes e argumentos pouco relacionados ao tema.",
+            0: "Ausencia de defesa de um ponto de vista.",
+        },
+        4: {
+            200: "Articula bem as partes do texto, com repertorio diversificado de conectivos.",
+            160: "Articula as partes do texto, com poucas inadequacoes de coesao.",
+            120: "Articula as partes de forma mediana, com algumas inadequacoes.",
+            80: "Articula as partes de forma insuficiente, com muitas inadequacoes.",
+            40: "Articulacao precaria entre as partes do texto.",
+            0: "Ausencia de articulacao entre as partes.",
+        },
+        5: {
+            200: "Proposta completa (acao, agente, modo, efeito e detalhamento), respeitando os direitos humanos.",
+            160: "Proposta com quatro dos cinco elementos, respeitando os direitos humanos.",
+            120: "Proposta com tres dos cinco elementos.",
+            80: "Proposta com dois dos cinco elementos.",
+            40: "Proposta vaga ou tangencial (apenas um elemento).",
+            0: "Ausencia de proposta ou desrespeito aos direitos humanos.",
+        },
+    }
+
+    def _descritor_nivel(self, competencia: int, nota: int) -> str:
+        """Descritor do nivel da rubrica para uma competencia, dada a nota (0-200)."""
+        nota = nota or 0
+        nivel_pontos = max(0, min(200, round(nota / 40) * 40))
+        return self.RUBRICA_NIVEIS.get(competencia, {}).get(nivel_pontos, "")
+
+    def get_rubrica(self) -> Dict[str, Any]:
+        """Retorna a rubrica detalhada das 5 competencias (criterios + descritores de nivel)."""
+        rubrica = []
+        for num in range(1, 6):
+            comp = self.COMPETENCIAS_ENEM[num]
+            rubrica.append({
+                "numero": num,
+                "nome": comp["nome"],
+                "descricao": comp["descricao"],
+                "criterios": comp["criterios"],
+                "niveis": [
+                    {"pontos": pts, "descritor": desc}
+                    for pts, desc in sorted(self.RUBRICA_NIVEIS[num].items(), reverse=True)
+                ],
+            })
+        return {"competencias": rubrica, "nota_maxima": 1000, "pontos_por_competencia": 200}
+
     def _classificar_nivel(self, nota: int) -> str:
         """Classifica o nível baseado na nota"""
         for limite, nivel in self.NIVEIS_NOTA:
@@ -292,10 +360,16 @@ IMPORTANTE:
                 correcao["quantidade_palavras"] = quantidade_palavras
                 correcao["nivel_geral"] = self._classificar_nivel_geral(nota_final)
                 
-                # Adicionar níveis por competência
+                # Adicionar niveis, descritores e criterios por competencia (rubrica detalhada)
                 for i in range(1, 6):
                     nota = correcao.get(f"nota_competencia_{i}", 0)
                     correcao[f"nivel_competencia_{i}"] = self._classificar_nivel(nota)
+                    correcao[f"descritor_competencia_{i}"] = self._descritor_nivel(i, nota)
+                    if not correcao.get(f"criterios_competencia_{i}"):
+                        correcao[f"criterios_competencia_{i}"] = [
+                            {"criterio": c, "situacao": None}
+                            for c in self.COMPETENCIAS_ENEM[i]["criterios"]
+                        ]
                 
                 return correcao
             else:

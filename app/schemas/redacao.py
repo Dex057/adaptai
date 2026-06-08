@@ -72,6 +72,8 @@ class CompetenciaENEM(BaseModel):
     nota: int  # 0-200
     nivel: str  # "Excelente", "Bom", "Mediano", etc.
     feedback: str
+    descritor_nivel: Optional[str] = None  # descritor da rubrica para o nivel da nota
+    criterios: Optional[List[Dict[str, Any]]] = None  # criterios avaliados na competencia
 
 
 class TemaRedacaoBase(BaseModel):

@@ -4,9 +4,19 @@ Integração com Claude API da Anthropic
 """
 import anthropic
 import json
+import re
+import asyncio
 from typing import List, Dict, Any
 from app.core.config import settings
+from app.core.logging_config import get_logger
 from app.models.prova import TipoQuestao, DificuldadeQuestao
+
+logger = get_logger(__name__)
+
+
+class ProvaIAError(Exception):
+    """Erro ao gerar ou interpretar questoes da IA (apos esgotar as tentativas)."""
+    pass
 
 
 class ProvaAIService:
@@ -15,12 +25,18 @@ class ProvaAIService:
     def __init__(self):
         self._client = None
         self.model = settings.CLAUDE_MODEL
+        self.max_retries = 3          # tentativas para gerar questoes
+        self.timeout_seconds = 120.0  # timeout por chamada a IA
     
     @property
     def client(self):
-        """Lazy initialization do cliente Anthropic"""
+        """Lazy initialization do cliente Anthropic (com timeout e retries de rede)"""
         if self._client is None:
-            self._client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+            self._client = anthropic.Anthropic(
+                api_key=settings.ANTHROPIC_API_KEY,
+                timeout=self.timeout_seconds,
+                max_retries=2,
+            )
         return self._client
     
     async def gerar_questoes(
@@ -33,18 +49,11 @@ class ProvaAIService:
         dificuldade: DificuldadeQuestao
     ) -> List[Dict[str, Any]]:
         """
-        Gera questões usando Claude AI
-        
-        Args:
-            conteudo_prompt: Descrição do conteúdo/tema
-            materia: Matéria da prova
-            serie_nivel: Série/nível escolar
-            quantidade: Quantidade de questões
-            tipo_questao: Tipo das questões
-            dificuldade: Nível de dificuldade
-            
-        Returns:
-            Lista de questões geradas
+        Gera questões usando Claude AI, com retry + backoff e timeout.
+
+        Tenta ate self.max_retries vezes. Erros transitorios da API e respostas
+        com JSON invalido disparam nova tentativa (com espera crescente). Apos
+        esgotar as tentativas, levanta ProvaIAError com mensagem amigavel.
         """
         
         # Monta o prompt para Claude
@@ -57,29 +66,43 @@ class ProvaAIService:
             dificuldade=dificuldade
         )
         
-        try:
-            # Chama Claude API
-            message = self.client.messages.create(
-                model=self.model,
-                max_tokens=4000,
-                temperature=0.7,
-                messages=[{
-                    "role": "user",
-                    "content": prompt
-                }]
-            )
-            
-            # Extrai o conteúdo da resposta
-            resposta = message.content[0].text
-            
-            # Parse do JSON
-            questoes = self._parse_questoes_json(resposta)
-            
-            return questoes
-            
-        except Exception as e:
-            print(f"❌ Erro ao gerar questões com IA: {e}")
-            raise Exception(f"Erro ao gerar questões: {str(e)}")
+        ultimo_erro = None
+        for tentativa in range(1, self.max_retries + 1):
+            try:
+                message = self.client.messages.create(
+                    model=self.model,
+                    max_tokens=4000,
+                    temperature=0.7,
+                    timeout=self.timeout_seconds,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                resposta = message.content[0].text
+                questoes = self._parse_questoes_json(resposta)
+
+                if not isinstance(questoes, list) or not questoes:
+                    raise ProvaIAError("A IA nao retornou uma lista de questoes valida")
+
+                return questoes
+
+            except (anthropic.APIError, ProvaIAError) as e:
+                ultimo_erro = e
+                logger.warning(
+                    "Falha ao gerar questoes (tentativa %s/%s): %s",
+                    tentativa, self.max_retries, e
+                )
+                if tentativa < self.max_retries:
+                    # Backoff exponencial: 2s, 4s, 8s...
+                    await asyncio.sleep(min(2 ** tentativa, 8))
+                    continue
+            except Exception as e:
+                ultimo_erro = e
+                logger.exception("Erro inesperado ao gerar questoes com IA")
+                break
+
+        raise ProvaIAError(
+            "Não foi possível gerar as questões com a IA após várias tentativas. "
+            "Tente novamente em instantes."
+        ) from ultimo_erro
     
     def _criar_prompt_geracao(
         self,
@@ -154,31 +177,68 @@ Gere as {quantidade} questões agora:"""
         
         return prompt
     
-    def _parse_questoes_json(self, resposta: str) -> List[Dict[str, Any]]:
-        """Parse da resposta JSON de Claude"""
-        try:
-            # Remove possíveis markdown
-            resposta = resposta.strip()
-            if resposta.startswith("```json"):
-                resposta = resposta[7:]
-            if resposta.startswith("```"):
-                resposta = resposta[3:]
-            if resposta.endswith("```"):
-                resposta = resposta[:-3]
-            resposta = resposta.strip()
-            
-            # Parse JSON
-            data = json.loads(resposta)
-            
-            if "questoes" in data:
+    def _parse_questoes_json(self, resposta: str):
+        """
+        Parse robusto da resposta da IA. Tenta, em ordem:
+        1) bloco cercado por ```json ... ``` (ou ``` ... ```),
+        2) o texto inteiro sem cercas,
+        3) o recorte do primeiro '{' ao ultimo '}' (descarta preambulo/postambulo).
+        Em cada candidato tenta tambem reparar virgulas finais.
+        Levanta ProvaIAError se nada for interpretavel.
+
+        Retorna a lista em data["questoes"] quando existir; senao o proprio objeto
+        (reaproveitado por analises que retornam um dict).
+        """
+        bruto = (resposta or "").strip()
+        if not bruto:
+            raise ProvaIAError("Resposta vazia da IA")
+
+        candidatos = []
+
+        # 1) Bloco cercado por ```json ... ``` ou ``` ... ```
+        m = re.search(r"```(?:json)?\s*(.+?)```", bruto, re.DOTALL | re.IGNORECASE)
+        if m:
+            candidatos.append(m.group(1).strip())
+
+        # 2) Texto inteiro, removendo cercas de inicio/fim se houver
+        sem_cercas = bruto
+        if sem_cercas.startswith("```json"):
+            sem_cercas = sem_cercas[7:]
+        elif sem_cercas.startswith("```"):
+            sem_cercas = sem_cercas[3:]
+        if sem_cercas.endswith("```"):
+            sem_cercas = sem_cercas[:-3]
+        candidatos.append(sem_cercas.strip())
+
+        # 3) Recorte do primeiro '{' ao ultimo '}'
+        ini, fim = bruto.find("{"), bruto.rfind("}")
+        if ini != -1 and fim != -1 and fim > ini:
+            candidatos.append(bruto[ini:fim + 1])
+
+        for cand in candidatos:
+            data = self._tentar_json(cand)
+            if data is None:
+                continue
+            if isinstance(data, dict) and "questoes" in data:
                 return data["questoes"]
-            else:
-                return data
-                
-        except json.JSONDecodeError as e:
-            print(f"❌ Erro ao fazer parse do JSON: {e}")
-            print(f"Resposta recebida: {resposta[:500]}...")
-            raise Exception("Erro ao processar resposta da IA. Formato JSON inválido.")
+            return data
+
+        logger.error("JSON invalido da IA. Inicio da resposta: %s", bruto[:400])
+        raise ProvaIAError("Formato de resposta da IA invalido (JSON nao reconhecido)")
+
+    @staticmethod
+    def _tentar_json(texto: str):
+        """json.loads; se falhar, remove virgulas finais e tenta de novo. None se falhar."""
+        if not texto:
+            return None
+        try:
+            return json.loads(texto)
+        except json.JSONDecodeError:
+            limpo = re.sub(r",(\s*[}\]])", r"\1", texto)
+            try:
+                return json.loads(limpo)
+            except json.JSONDecodeError:
+                return None
     
     async def analisar_desempenho(
         self,
@@ -241,6 +301,7 @@ Gere a análise agora:"""
                 model=self.model,
                 max_tokens=4000,
                 temperature=0.5,
+                timeout=self.timeout_seconds,
                 messages=[{
                     "role": "user",
                     "content": prompt
@@ -310,6 +371,7 @@ Escreva o feedback (máximo 300 palavras):"""
                 model=self.model,
                 max_tokens=1500,
                 temperature=0.8,
+                timeout=self.timeout_seconds,
                 messages=[{
                     "role": "user",
                     "content": prompt

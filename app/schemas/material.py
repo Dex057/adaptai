@@ -11,6 +11,10 @@ class TipoMaterialEnum(str, Enum):
     """Tipos de materiais"""
     visual = "visual"
     mapa_mental = "mapa_mental"
+    resumo = "resumo"
+    texto_simplificado = "texto_simplificado"
+    roteiro_estudo = "roteiro_estudo"
+    atividades = "atividades"
 
 
 class StatusMaterialEnum(str, Enum):
@@ -53,6 +57,8 @@ class MaterialResponse(BaseModel):
     criado_em: datetime
     atualizado_em: Optional[datetime]
     criado_por_id: int
+    versao: int = 1
+    historico_versoes: Optional[List[dict]] = None
     
     class Config:
         from_attributes = True

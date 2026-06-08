@@ -24,6 +24,7 @@ from app.api.dependencies import get_current_active_user
 from app.models.user import User
 from app.models.student import Student
 from app.models.relatorio import Relatorio
+from app.core.tenant import enforce_limite_relatorios
 from app.schemas.relatorio import (
     RelatorioCreate,
     RelatorioUpdate,
@@ -424,7 +425,9 @@ async def upload_e_analisar_relatorio(
     • WebSocket para progress bar em tempo real
     • Frontend mostra 0% → 100% automaticamente!
     """
-    
+    # Limite de plano (soft): bloqueia se a escola atingiu o limite mensal de relatorios.
+    enforce_limite_relatorios(db, current_user)
+
     student = db.query(Student).filter(Student.id == student_id).first()
     if not student:
         raise HTTPException(status_code=404, detail="Aluno não encontrado")

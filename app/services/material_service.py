@@ -220,6 +220,81 @@ RETORNE APENAS O JSON, sem explicações ou markdown."""
                 "error": str(e)
             }
 
+    def gerar_material_texto(self, formato: str, titulo: str, conteudo: str, materia: str, serie: str, adaptacoes: list = None) -> dict:
+        """
+        Gera materiais textuais em HTML para os formatos de adaptacao:
+        resumo, texto_simplificado, roteiro_estudo, atividades.
+
+        Returns:
+            dict com 'success', 'html' e 'tokens_used' (ou 'error').
+        """
+        formatos = {
+            "resumo": {
+                "nome": "Resumo de estudo",
+                "objetivo": "Resuma o conteudo de forma clara e organizada, destacando os pontos principais.",
+                "estrutura": "Use topicos curtos, destaque palavras-chave e finalize com um quadro de 'pontos essenciais'.",
+            },
+            "texto_simplificado": {
+                "nome": "Texto simplificado",
+                "objetivo": "Reescreva o conteudo em linguagem simples e acessivel, com frases curtas e diretas.",
+                "estrutura": "Paragrafos curtos, vocabulario simples; explique termos dificeis entre parenteses. Evite metaforas e ironia.",
+            },
+            "roteiro_estudo": {
+                "nome": "Roteiro de estudo",
+                "objetivo": "Crie um roteiro de estudo passo a passo sobre o conteudo.",
+                "estrutura": "Etapas numeradas com o que estudar em cada uma, tempo sugerido e uma checklist final.",
+            },
+            "atividades": {
+                "nome": "Lista de atividades",
+                "objetivo": "Crie atividades/exercicios sobre o conteudo, com gabarito ao final.",
+                "estrutura": "5 a 8 questoes variadas (objetivas e abertas), seguidas de uma secao 'Gabarito comentado'.",
+            },
+        }
+        cfg = formatos.get(formato, formatos["resumo"])
+
+        adaptacoes_text = ""
+        if adaptacoes:
+            adaptacoes_text = (
+                f"\n\nIMPORTANTE: material para alunos com: {', '.join(adaptacoes)}. "
+                "Adapte a linguagem e o formato para maior acessibilidade (frases curtas, sem ambiguidade)."
+            )
+
+        prompt = f"""Crie um material do tipo "{cfg['nome']}" sobre: {titulo}
+
+MATERIA: {materia}
+SERIE/NIVEL: {serie}
+
+CONTEUDO BASE:
+{conteudo}{adaptacoes_text}
+
+OBJETIVO: {cfg['objetivo']}
+ESTRUTURA: {cfg['estrutura']}
+
+FORMATO DE SAIDA:
+- Retorne APENAS HTML (sem as tags <html>, <head>, <body>), com CSS inline.
+- Visual limpo e legivel: fonte minima 16px, bom espacamento, titulos hierarquicos e boxes com bordas arredondadas.
+- Use cores suaves e, quando ajudar a compreensao, emojis discretos.
+- NAO inclua explicacoes fora do HTML."""
+
+        try:
+            response = self.client.messages.create(
+                model=self.model,
+                max_tokens=4000,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            html_content = response.content[0].text.strip()
+            html_content = html_content.replace("```html", "").replace("```", "").strip()
+            return {
+                "success": True,
+                "html": html_content,
+                "tokens_used": response.usage.input_tokens + response.usage.output_tokens
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+
 
 # Instância global do service
 material_service = MaterialGeracaoService()

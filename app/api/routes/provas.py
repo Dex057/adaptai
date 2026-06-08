@@ -37,8 +37,9 @@ from app.schemas.prova import (
     ProvaParaAluno,
     QuestaoParaAluno
 )
-from app.services.prova_ai_service import prova_ai_service
+from app.services.prova_ai_service import prova_ai_service, ProvaIAError
 from app.api.dependencies import get_current_user, oauth2_scheme, get_user_from_token
+from app.core.tenant import enforce_limite_provas
 
 router = APIRouter(prefix="/provas")
 
@@ -69,6 +70,13 @@ async def gerar_prova_com_ia(
     # Valida usuario e fecha conexao ANTES de chamar IA
     current_user = get_user_from_token(token)
     user_id = current_user.id
+
+    # Limite de plano (soft): checa em sessao curta antes de gastar IA.
+    _db_lim = SessionLocal()
+    try:
+        enforce_limite_provas(_db_lim, current_user)
+    finally:
+        _db_lim.close()
     
     try:
         # PASSO 1: Gera questoes com IA (SEM conexao com banco)
@@ -188,6 +196,12 @@ Por favor, adapte as questões considerando:
         finally:
             db.close()
         
+    except ProvaIAError as e:
+        print(f"[IA] Falha ao gerar questoes: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(e)
+        )
     except Exception as e:
         print(f"[ERRO] Erro ao gerar prova: {e}")
         raise HTTPException(

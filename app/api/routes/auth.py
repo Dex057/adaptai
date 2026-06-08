@@ -12,11 +12,16 @@ from app.core.security import (
     create_access_token,
     create_refresh_token,
     decode_refresh_token,
+    create_password_reset_token,
+    decode_password_reset_token,
+    password_reset_fingerprint,
 )
+from app.schemas.user import validar_senha_forte
+from app.services.email_service import send_password_reset_email
 from app.core.config import settings
 from app.core.rate_limit import check_rate_limit
 from app.api.dependencies import get_current_active_user
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -368,3 +373,92 @@ def get_current_student_info(token: str = Depends(oauth2_scheme), db: Session = 
         "profile_data": student.profile_data,
         "is_active": student.is_active
     }
+
+
+# ============================================
+# RECUPERACAO DE SENHA (forgot / reset)
+# ============================================
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    nova_senha: str
+
+
+@router.post("/forgot-password")
+def forgot_password(payload: ForgotPasswordRequest, request: Request, db: Session = Depends(get_db)):
+    """
+    Solicita redefinicao de senha. Envia um email com link de reset SE o email existir.
+
+    SEGURANCA:
+    - Rate limited (5/hora por IP).
+    - Resposta SEMPRE igual (nao revela se o email existe) - anti-enumeracao.
+    - Falha no envio de email nao altera a resposta nem quebra o fluxo.
+    """
+    check_rate_limit(
+        request, key="forgot_password", max_requests=5, window_seconds=3600,
+        error_message="Muitas solicitacoes de redefinicao. Aguarde 1 hora."
+    )
+
+    user = db.query(User).filter(User.email == payload.email).first()
+    if user and user.is_active:
+        fp = password_reset_fingerprint(user.hashed_password)
+        token = create_password_reset_token(user.email, fp)
+        reset_link = f"{settings.FRONTEND_URL.rstrip('/')}/redefinir-senha?token={token}"
+        send_password_reset_email(user.email, reset_link)
+
+    # Resposta neutra, independente de o email existir ou nao (anti-enumeracao)
+    return {"message": "Se o e-mail estiver cadastrado, enviamos as instrucoes para redefinir a senha."}
+
+
+@router.post("/reset-password")
+def reset_password(payload: ResetPasswordRequest, request: Request, db: Session = Depends(get_db)):
+    """
+    Redefine a senha a partir de um token de reset valido.
+
+    SEGURANCA:
+    - Rate limited (10/hora por IP).
+    - Token validado por tipo, expiracao e fingerprint do hash atual
+      (o token deixa de valer apos a senha mudar - uso unico de fato).
+    """
+    check_rate_limit(
+        request, key="reset_password", max_requests=10, window_seconds=3600,
+        error_message="Muitas tentativas. Aguarde 1 hora."
+    )
+
+    data = decode_password_reset_token(payload.token)
+    if not data:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Link de redefinicao invalido ou expirado. Solicite um novo."
+        )
+
+    email = data.get("sub")
+    user = db.query(User).filter(User.email == email).first() if email else None
+    if not user or not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Link de redefinicao invalido ou expirado. Solicite um novo."
+        )
+
+    # O fingerprint do token deve bater com o hash atual. Se nao bate, o link ja
+    # foi usado (a senha mudou) ou e de uma senha antiga.
+    if data.get("fp") != password_reset_fingerprint(user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Este link ja foi utilizado. Solicite um novo."
+        )
+
+    # Valida a politica de senha forte (mensagem limpa em caso de falha)
+    try:
+        validar_senha_forte(payload.nova_senha)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    user.hashed_password = get_password_hash(payload.nova_senha)
+    db.commit()
+
+    return {"message": "Senha redefinida com sucesso. Voce ja pode entrar com a nova senha."}

@@ -237,59 +237,173 @@ Analise o documento com atenção e extraia todas as informações relevantes pa
         )
 
 
-@router.post("/gerar-pei-completo")
-async def gerar_pei_completo(
-    dados_laudos: dict,
+# Modelo usado para consolidar o PEI a partir de relatorios (apenas texto, sem visao).
+# Mantido separado de MODELO_VISAO porque aqui nao ha PDF/imagem para processar.
+MODELO_PEI_TEXTO = "claude-sonnet-4-20250514"
+
+
+@router.post("/gerar-pei-de-relatorios")
+async def gerar_pei_de_relatorios(
+    data: dict,
     request: Request,
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """
-    Gera um PEI completo baseado nos dados extraídos dos relatórios de terapias e acompanhamento usando IA.
-    
-    SEGURANCA: rate limited (20/hora).
+    Gera um PEI completo automaticamente a partir dos relatorios ja salvos do aluno.
+
+    Recebe uma lista de IDs de relatorios, carrega os dados extraidos de cada um e
+    consolida tudo em um PEI estruturado usando IA.
+
+    SEGURANCA: rate limited (20/hora) - cada geracao com IA e cara em tokens.
+
+    Body:
+    {
+        "student_id": int,
+        "relatorio_ids": [1, 2, 3, ...]
+    }
     """
     check_rate_limit(
-        request, key="gerar_pei_completo", max_requests=20, window_seconds=3600,
+        request, key="gerar_pei_de_relatorios", max_requests=20, window_seconds=3600,
         error_message="Limite de geracoes de PEI atingido. Aguarde 1 hora."
     )
-    
+
+    # NOTA: o limite mensal de PEIs (limite_peis_mes) NAO e aplicado aqui de proposito.
+    # O fluxo atual nao grava registros na tabela 'peis': o PEI e salvo como JSON em
+    # Student.diagnosis (via PUT /students/{id}), entao nao ha um sinal mensal confiavel
+    # para contar aqui. O custo de geracao ja e contido pelo rate limit acima (20/hora).
+    # A cota mensal de PEI sera tratada junto com a trilha de pagamento.
+
+    student_id = data.get("student_id")
+    relatorio_ids = data.get("relatorio_ids", [])
+
+    if not student_id:
+        raise HTTPException(status_code=400, detail="student_id é obrigatório")
+
+    if not relatorio_ids:
+        raise HTTPException(
+            status_code=400,
+            detail="Selecione pelo menos um relatório para gerar o PEI"
+        )
+
+    # Verificar se o aluno existe
+    student = db.query(Student).filter(Student.id == student_id).first()
+    if not student:
+        raise HTTPException(status_code=404, detail="Aluno não encontrado")
+
+    # Carregar relatorios filtrando pelo aluno (evita acesso cruzado entre alunos)
+    relatorios = db.query(Relatorio).filter(
+        Relatorio.id.in_(relatorio_ids),
+        Relatorio.student_id == student_id
+    ).all()
+
+    if not relatorios:
+        raise HTTPException(
+            status_code=404,
+            detail="Nenhum relatório encontrado com os IDs fornecidos"
+        )
+
+    # Compilar os dados de todos os relatorios selecionados
+    relatorios_dados = []
+    for rel in relatorios:
+        dados = rel.dados_extraidos
+
+        # Se houver ponteiro para um JSON completo no storage, carrega-lo
+        if isinstance(dados, dict) and dados.get("json_path"):
+            json_file = RELATORIOS_DIR / dados["json_path"]
+            if json_file.exists():
+                try:
+                    with open(json_file, "r", encoding="utf-8") as f:
+                        dados = json.load(f)
+                except Exception:
+                    logger.warning(
+                        "Falha ao ler JSON do relatorio no storage",
+                        extra={"relatorio_id": rel.id}
+                    )
+
+        relatorios_dados.append({
+            "id": rel.id,
+            "tipo": rel.tipo,
+            "profissional": {
+                "nome": rel.profissional_nome,
+                "especialidade": rel.profissional_especialidade,
+                "registro": rel.profissional_registro
+            },
+            "data_emissao": rel.data_emissao.isoformat() if rel.data_emissao else None,
+            "resumo": rel.resumo,
+            "dados_completos": dados
+        })
+
     client = get_anthropic_client()
-    
-    prompt = f"""Com base nos dados dos relatórios de terapias e acompanhamento abaixo, gere um Plano Educacional Individualizado (PEI) completo.
 
-DADOS DOS RELATÓRIOS:
-{json.dumps(dados_laudos, ensure_ascii=False, indent=2)}
+    prompt = f"""Você é um especialista em educação inclusiva e está criando um Plano Educacional Individualizado (PEI) completo.
 
-Gere o PEI em formato JSON com a seguinte estrutura:
+INFORMAÇÕES DO ALUNO:
+- Nome: {student.name}
+- Série/Ano: {student.grade_level or 'Não especificado'}
+
+RELATÓRIOS DE TERAPIAS E ACOMPANHAMENTO ({len(relatorios_dados)} documentos):
+{json.dumps(relatorios_dados, ensure_ascii=False, indent=2)}
+
+Com base em TODOS os relatórios acima, gere um PEI COMPLETO e DETALHADO em formato JSON:
+
 {{
-    "caracteristicas": "string (características gerais do aluno baseadas nos relatórios)",
-    "pontos_fortes": "string (pontos fortes identificados ou potenciais)",
-    "dificuldades": "string (principais dificuldades identificadas)",
-    "adaptacoes_curriculares": "string (adaptações curriculares recomendadas)",
-    "adaptacoes_avaliacao": "string (adaptações para avaliações)",
-    "adaptacoes_ambiente": "string (adaptações de ambiente escolar)",
-    "recursos_apoio": "string (recursos e materiais de apoio)",
-    "metas_curto_prazo": "string (metas para 1-3 meses)",
-    "metas_medio_prazo": "string (metas para 3-6 meses)",
-    "metas_longo_prazo": "string (metas para o ano letivo)",
-    "estrategias_ensino": "string (estratégias de ensino recomendadas)",
-    "estrategias_comunicacao": "string (estratégias de comunicação)",
-    "estrategias_comportamento": "string (estratégias de manejo comportamental)",
-    "profissionais_apoio": "string (profissionais de apoio necessários)",
-    "frequencia_acompanhamento": "string (frequência de acompanhamento sugerida)",
-    "observacoes": "string (observações gerais)"
+    "diagnosticos": {{
+        "tea": false,
+        "tea_nivel": null,
+        "tdah": false,
+        "dislexia": false,
+        "discalculia": false,
+        "disgrafia": false,
+        "deficiencia_visual": false,
+        "deficiencia_auditiva": false,
+        "deficiencia_intelectual": false,
+        "deficiencia_fisica": false,
+        "superdotacao": false,
+        "outro": "",
+        "outro_qual": ""
+    }},
+    "caracteristicas_gerais": "Parágrafo detalhado com características gerais do aluno, consolidando informações de TODOS os relatórios",
+    "pontos_fortes": "Parágrafo detalhado com pontos fortes identificados pelos profissionais",
+    "dificuldades": "Parágrafo detalhado com principais dificuldades identificadas",
+    "adaptacoes_curriculares": "Parágrafo detalhado com adaptações curriculares específicas recomendadas pelos profissionais",
+    "adaptacoes_avaliacao": "Parágrafo detalhado com adaptações para avaliações (tempo extra, formato, etc)",
+    "adaptacoes_ambiente": "Parágrafo detalhado com adaptações de ambiente físico e social",
+    "recursos_apoio": "Parágrafo detalhado com recursos e materiais de apoio necessários",
+    "metas_curto_prazo": "Parágrafo detalhado com 3-5 metas concretas para 1-3 meses",
+    "metas_medio_prazo": "Parágrafo detalhado com 3-5 metas concretas para 3-6 meses",
+    "metas_longo_prazo": "Parágrafo detalhado com 3-5 metas concretas para o ano letivo",
+    "estrategias_ensino": "Parágrafo detalhado com estratégias pedagógicas específicas",
+    "estrategias_comunicacao": "Parágrafo detalhado com estratégias de comunicação (verbal, visual, etc)",
+    "estrategias_comportamento": "Parágrafo detalhado com estratégias de manejo comportamental",
+    "profissionais_apoio": "Lista de profissionais que devem acompanhar o aluno (psicólogo, fonoaudiólogo, etc)",
+    "frequencia_acompanhamento": "Frequência recomendada para revisão do PEI e acompanhamentos",
+    "observacoes": "Observações gerais importantes para a equipe escolar"
 }}
 
-Seja específico e prático nas recomendações. 
-Considere o contexto escolar brasileiro.
-Leve em consideração as orientações de todos os profissionais (psicopedagogos, terapeutas ocupacionais, fonoaudiólogos, psicólogos, médicos, etc).
+INSTRUÇÕES IMPORTANTES:
+1. Analise TODOS os relatórios e consolide as informações
+2. Priorize recomendações que aparecem em múltiplos relatórios
+3. Seja ESPECÍFICO e PRÁTICO - evite generalidades
+4. Use linguagem acessível para professores
+5. Foque em ações CONCRETAS e IMPLEMENTÁVEIS
+6. Considere a realidade escolar brasileira
+7. Marque os diagnósticos apenas se explicitamente mencionados
+8. Nos parágrafos, seja detalhado (mínimo 3-4 linhas cada)
+9. NUNCA use listas com bullet points ou números nos parágrafos - escreva texto corrido
+10. Seja encorajador mas realista
+
 Retorne APENAS o JSON, sem explicações adicionais."""
 
     try:
+        logger.info(
+            "Gerando PEI consolidado a partir de relatorios",
+            extra={"student_id": student_id, "relatorios": len(relatorios_dados)}
+        )
+
         message = client.messages.create(
-            model=MODELO_VISAO,  # Modelo que suporta PDF/imagens
-            max_tokens=4096,
+            model=MODELO_PEI_TEXTO,
+            max_tokens=8000,
             messages=[
                 {
                     "role": "user",
@@ -297,34 +411,37 @@ Retorne APENAS o JSON, sem explicações adicionais."""
                 }
             ],
         )
-        
+
         response_text = message.content[0].text.strip()
-        
-        # Limpar marcadores de código
-        if response_text.startswith("```json"):
-            response_text = response_text[7:]
-        if response_text.startswith("```"):
-            response_text = response_text[3:]
-        if response_text.endswith("```"):
-            response_text = response_text[:-3]
+
+        # Limpar marcadores de bloco de codigo, se vierem
+        for marker in ["```json", "```"]:
+            response_text = response_text.replace(marker, "")
         response_text = response_text.strip()
-        
+
         try:
             pei_gerado = json.loads(response_text)
         except json.JSONDecodeError:
+            logger.warning("PEI gerado nao retornou JSON valido")
             pei_gerado = {
                 "erro_parse": True,
-                "texto_bruto": response_text
+                "texto_bruto": response_text,
+                "mensagem": "Não foi possível estruturar o PEI automaticamente"
             }
-        
+
         return {
             "success": True,
+            "student_name": student.name,
+            "relatorios_utilizados": len(relatorios_dados),
             "pei": pei_gerado
         }
-        
+
     except Exception:
-        logger.exception("Falha ao gerar PEI com IA")
+        logger.exception(
+            "Falha ao gerar PEI a partir de relatorios",
+            extra={"student_id": student_id}
+        )
         raise HTTPException(
             status_code=500,
-            detail="Erro ao gerar PEI. Tente novamente mais tarde."
+            detail="Erro ao gerar PEI com IA. Tente novamente mais tarde."
         )

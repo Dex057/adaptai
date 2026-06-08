@@ -12,6 +12,10 @@ class TipoMaterial(str, Enum):
     """Tipos de materiais disponíveis"""
     VISUAL = "visual"
     MAPA_MENTAL = "mapa_mental"
+    RESUMO = "resumo"
+    TEXTO_SIMPLIFICADO = "texto_simplificado"
+    ROTEIRO_ESTUDO = "roteiro_estudo"
+    ATIVIDADES = "atividades"
 
 
 class StatusMaterial(str, Enum):
@@ -41,6 +45,10 @@ class Material(Base):
     # Metadados
     metadados = Column(JSON, nullable=True)  # Tokens usados, tempo de geração, etc
     status = Column(SQLEnum(StatusMaterial), default=StatusMaterial.GERANDO)
+    
+    # Versionamento: versao atual e historico de versoes anteriores arquivadas
+    versao = Column(Integer, default=1)
+    historico_versoes = Column(JSON, nullable=True)  # [{versao, arquivo_path, criado_em, conteudo_prompt}]
     
     # Timestamps
     criado_em = Column(DateTime(timezone=True), server_default=func.now())

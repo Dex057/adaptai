@@ -2,6 +2,7 @@
 Service para gerenciamento de arquivos de materiais no storage
 """
 import json
+import shutil
 from pathlib import Path
 from typing import Optional, Dict, Any
 
@@ -153,6 +154,31 @@ class StorageService:
             html_path = self._get_file_path(material_id, "html")
             json_path = self._get_file_path(material_id, "json")
             return html_path.exists() or json_path.exists()
+
+    def _get_versioned_path(self, material_id: int, versao: int, tipo: str) -> Path:
+        """Caminho do arquivo de uma versao arquivada (ex: 123_v2.html)."""
+        extensao = "html" if tipo == "html" else "json"
+        return self.storage_dir / f"{material_id}_v{versao}.{extensao}"
+
+    def arquivar_versao(self, material_id: int, versao: int, tipo: str) -> Optional[str]:
+        """Copia o arquivo atual para um nome versionado. Retorna o nome do arquivo ou None."""
+        atual = self._get_file_path(material_id, tipo)
+        if not atual.exists():
+            return None
+        destino = self._get_versioned_path(material_id, versao, tipo)
+        shutil.copy2(atual, destino)
+        print(f"🗂️ Versão arquivada: {destino}")
+        return destino.name
+
+    def ler_versao(self, material_id: int, versao: int, tipo: str):
+        """Le o conteudo de uma versao arquivada (HTML como str, JSON como dict). None se nao existir."""
+        path = self._get_versioned_path(material_id, versao, tipo)
+        if not path.exists():
+            return None
+        with open(path, 'r', encoding='utf-8') as f:
+            if tipo == "html":
+                return f.read()
+            return json.load(f)
 
 
 # Instância global do service

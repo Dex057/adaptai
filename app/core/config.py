@@ -119,6 +119,12 @@ class Settings(BaseSettings):
     ANTHROPIC_API_KEY: str = ""
     CLAUDE_MODEL: str = "claude-3-haiku-20240307"
 
+    # Email transacional (Resend) - usado para recuperacao de senha
+    RESEND_API_KEY: str = ""
+    EMAIL_FROM: str = "AdaptAI <onboarding@resend.dev>"
+    # URL base do frontend, usada para montar links em emails (ex: link de reset)
+    FRONTEND_URL: str = "http://localhost:5173"
+
     # CORS - Origens permitidas (separadas por vírgula)
     BACKEND_CORS_ORIGINS: str = "http://localhost:3000,http://localhost:5173,https://*.vercel.app"
 

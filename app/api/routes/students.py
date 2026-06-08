@@ -2,18 +2,50 @@
 🎓 ROTAS DE ESTUDANTES - AdaptAI
 Gerenciamento de alunos com filtro por professor/escola
 """
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
 from typing import List, Optional
+import csv
+import io
+import uuid
+from pathlib import Path
+from datetime import datetime
 
 from app.database import get_db
 from app.models.student import Student
 from app.models.user import User, UserRole
 from app.schemas.student import StudentCreate, StudentUpdate, StudentResponse, StudentListResponse
 from app.api.dependencies import get_current_active_user
+from app.core.tenant import enforce_limite_alunos
 
 router = APIRouter(prefix="/students", tags=["Students"])
+
+# Diretorio das fotos dos alunos (backend/storage/student_photos)
+STUDENT_PHOTOS_DIR = Path(__file__).parent.parent.parent.parent / "storage" / "student_photos"
+STUDENT_PHOTOS_DIR.mkdir(parents=True, exist_ok=True)
+
+# Formatos de imagem aceitos para a foto do aluno
+ALLOWED_IMAGE_TYPES = {
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+}
+
+
+def _parse_data(valor: str):
+    """Interpreta data em YYYY-MM-DD, DD/MM/YYYY ou DD-MM-YYYY. Retorna None se invalida."""
+    valor = (valor or "").strip()
+    if not valor:
+        return None
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(valor, fmt).date()
+        except ValueError:
+            continue
+    return None
 
 
 def get_students_query(db: Session, current_user: User):
@@ -54,6 +86,10 @@ def create_student(
     O aluno será automaticamente associado ao professor que o criou
     e à escola do professor (se houver).
     """
+    # Limite de plano (soft): bloqueia se a escola atingiu o limite de alunos.
+    # Nao afeta usuarios sem escola/assinatura ativa (grandfather).
+    enforce_limite_alunos(db, current_user)
+
     from app.core.security import get_password_hash
     
     # Verificar se email já existe
@@ -101,6 +137,7 @@ def list_students(
     turma: str = Query(None, description="Filtrar por turma"),
     search: str = Query(None, description="Buscar por nome"),
     todos: bool = Query(False, description="Admin: listar todos da escola"),
+    arquivados: bool = Query(False, description="Listar apenas alunos arquivados (inativos)"),
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
@@ -123,6 +160,12 @@ def list_students(
     else:
         # Professor sempre vê só seus alunos
         query = db.query(Student).filter(Student.created_by_user_id == current_user.id)
+    
+    # Arquivados: por padrao mostra apenas ativos (esconde arquivados/soft-deleted)
+    if arquivados:
+        query = query.filter(Student.is_active.is_(False))
+    else:
+        query = query.filter(Student.is_active.isnot(False))
     
     # Filtros
     if grade_level:
@@ -155,7 +198,10 @@ def list_my_students(
     Útil para admins que também são professores e querem ver
     apenas os alunos que eles mesmos cadastraram.
     """
-    query = db.query(Student).filter(Student.created_by_user_id == current_user.id)
+    query = db.query(Student).filter(
+        Student.created_by_user_id == current_user.id,
+        Student.is_active.isnot(False)
+    )
     
     if search:
         query = query.filter(Student.name.ilike(f"%{search}%"))
@@ -174,6 +220,7 @@ def list_school_students(
     turma: str = Query(None, description="Filtrar por turma"),
     professor_id: int = Query(None, description="Filtrar por professor"),
     search: str = Query(None, description="Buscar por nome"),
+    arquivados: bool = Query(False, description="Listar apenas alunos arquivados (inativos)"),
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
@@ -190,6 +237,12 @@ def list_school_students(
         )
     
     query = get_students_query(db, current_user)
+    
+    # Arquivados: por padrao apenas ativos
+    if arquivados:
+        query = query.filter(Student.is_active.is_(False))
+    else:
+        query = query.filter(Student.is_active.isnot(False))
     
     # Filtros
     if grade_level:
@@ -253,6 +306,115 @@ def get_students_stats(
         "total_escola": total_escola,
         "por_serie": {serie: count for serie, count in por_serie if serie},
         "por_turma": {turma: count for turma, count in por_turma if turma}
+    }
+
+
+@router.post("/importar-csv")
+def importar_alunos_csv(
+    arquivo: UploadFile = File(...),
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """
+    📥 Importar alunos em lote a partir de um arquivo CSV.
+
+    Colunas aceitas no cabecalho (em qualquer ordem): name (obrigatorio), email,
+    grade_level, turma, matricula, birth_date (YYYY-MM-DD ou DD/MM/YYYY), notes.
+    Aceita separador ',' ou ';'. Linhas invalidas ou duplicadas sao puladas e
+    reportadas no resultado.
+    """
+    # Limite de plano: falha rapido se a escola ja esta no limite de alunos
+    enforce_limite_alunos(db, current_user)
+
+    if not arquivo.filename or not arquivo.filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Envie um arquivo .csv")
+
+    raw = arquivo.file.read()
+    if len(raw) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Arquivo muito grande. Máximo: 5MB")
+
+    # Decodificar (utf-8 com BOM e o caso comum do Excel; latin-1 como fallback)
+    try:
+        texto = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        texto = raw.decode("latin-1")
+
+    if not texto.strip():
+        raise HTTPException(status_code=400, detail="Arquivo vazio")
+
+    # Detectar separador (',' ou ';') pela primeira linha
+    primeira_linha = texto.splitlines()[0]
+    delimiter = ";" if primeira_linha.count(";") > primeira_linha.count(",") else ","
+
+    reader = csv.DictReader(io.StringIO(texto), delimiter=delimiter)
+    cabecalhos = [(h or "").strip().lower() for h in (reader.fieldnames or [])]
+    if "name" not in cabecalhos and "nome" not in cabecalhos:
+        raise HTTPException(
+            status_code=400,
+            detail="O CSV precisa de um cabecalho com ao menos a coluna 'name' (ou 'nome')"
+        )
+
+    def _campo(row, *nomes):
+        for k, v in row.items():
+            if (k or "").strip().lower() in nomes:
+                return (v or "").strip()
+        return ""
+
+    total = 0
+    criados = 0
+    ignorados = 0
+    erros = []
+    emails_no_lote = set()
+
+    for i, row in enumerate(reader, start=2):  # linha 1 = cabecalho
+        total += 1
+        nome = _campo(row, "name", "nome")
+        if not nome or len(nome) < 3:
+            ignorados += 1
+            erros.append({"linha": i, "motivo": "nome ausente ou muito curto"})
+            continue
+
+        email = _campo(row, "email") or None
+        if email:
+            if email.lower() in emails_no_lote:
+                ignorados += 1
+                erros.append({"linha": i, "motivo": f"email duplicado no arquivo: {email}"})
+                continue
+            if db.query(Student).filter(Student.email == email).first():
+                ignorados += 1
+                erros.append({"linha": i, "motivo": f"email ja cadastrado: {email}"})
+                continue
+            emails_no_lote.add(email.lower())
+
+        nascimento = None
+        bd = _campo(row, "birth_date", "data_nascimento", "nascimento")
+        if bd:
+            nascimento = _parse_data(bd)
+            if nascimento is None:
+                erros.append({"linha": i, "motivo": f"data de nascimento ignorada (formato invalido): {bd}"})
+
+        novo = Student(
+            name=nome,
+            email=email,
+            grade_level=_campo(row, "grade_level", "serie", "ano") or "Não especificado",
+            turma=_campo(row, "turma") or None,
+            matricula=_campo(row, "matricula") or None,
+            birth_date=nascimento,
+            notes=_campo(row, "notes", "observacoes") or None,
+            is_active=True,
+            created_by_user_id=current_user.id,
+            escola_id=current_user.escola_id,
+        )
+        db.add(novo)
+        criados += 1
+
+    db.commit()
+    return {
+        "success": True,
+        "total_linhas": total,
+        "criados": criados,
+        "ignorados": ignorados,
+        "erros": erros,
     }
 
 
@@ -340,7 +502,10 @@ def delete_student(
     """
     🗑️ Deletar um estudante
     
-    Apenas o professor que criou ou Admin pode deletar.
+    Marca o aluno como inativo (is_active=False) em vez de apagar, preservando
+    todo o historico vinculado (relatorios, redacoes, provas, materiais). Use
+    POST /{id}/restaurar para reverter, ou DELETE /{id}/permanente para apagar
+    de vez. Apenas o professor que criou ou Admin pode arquivar.
     """
     # Verificar se é o criador ou admin
     student = db.query(Student).filter(Student.id == student_id).first()
@@ -363,9 +528,67 @@ def delete_student(
             detail="Você não tem permissão para deletar este aluno"
         )
     
+    # Soft-delete: arquiva o aluno (preserva relatorios, redacoes, provas, materiais).
+    student.is_active = False
+    db.commit()
+
+    return None
+
+
+@router.post("/{student_id}/restaurar", response_model=StudentResponse)
+def restore_student(
+    student_id: int,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """♻️ Restaurar um aluno arquivado (is_active=True)."""
+    student = db.query(Student).filter(Student.id == student_id).first()
+    if not student:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Aluno não encontrado")
+    pode = (
+        student.created_by_user_id == current_user.id or
+        current_user.role in [UserRole.ADMIN, UserRole.COORDINATOR, UserRole.SUPER_ADMIN]
+    )
+    if not pode:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Sem permissão para restaurar este aluno")
+    student.is_active = True
+    db.commit()
+    db.refresh(student)
+    return student
+
+
+@router.delete("/{student_id}/permanente", status_code=status.HTTP_204_NO_CONTENT)
+def hard_delete_student(
+    student_id: int,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """
+    ⛔ Excluir um aluno DEFINITIVAMENTE (e todo o historico vinculado).
+
+    Acao irreversivel. Apenas o professor que criou ou Admin pode executar.
+    """
+    student = db.query(Student).filter(Student.id == student_id).first()
+    if not student:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Aluno não encontrado")
+    pode = (
+        student.created_by_user_id == current_user.id or
+        current_user.role in [UserRole.ADMIN, UserRole.SUPER_ADMIN]
+    )
+    if not pode:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Sem permissão para excluir este aluno")
+
+    # Remove a foto do disco, se houver
+    if student.foto_path:
+        caminho = STUDENT_PHOTOS_DIR / student.foto_path
+        try:
+            if caminho.exists():
+                caminho.unlink()
+        except OSError:
+            pass
+
     db.delete(student)
     db.commit()
-    
     return None
 
 
@@ -480,3 +703,86 @@ def get_student_performance_history(
     ).order_by(PerformanceAnalysis.analyzed_at.desc()).all()
     
     return analyses
+
+
+@router.post("/{student_id}/foto", response_model=StudentResponse)
+def upload_foto_aluno(
+    student_id: int,
+    arquivo: UploadFile = File(...),
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """📷 Enviar/atualizar a foto do aluno (JPG, PNG ou WebP, max 5MB)."""
+    query = get_students_query(db, current_user)
+    student = query.filter(Student.id == student_id).first()
+    if not student:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Aluno não encontrado ou sem permissão")
+
+    extensao = ALLOWED_IMAGE_TYPES.get(arquivo.content_type)
+    if not extensao:
+        raise HTTPException(status_code=400, detail="Formato não suportado. Use JPG, PNG ou WebP.")
+
+    conteudo = arquivo.file.read()
+    if len(conteudo) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Imagem muito grande. Máximo: 5MB")
+
+    # Remove a foto anterior, se houver
+    if student.foto_path:
+        antigo = STUDENT_PHOTOS_DIR / student.foto_path
+        try:
+            if antigo.exists():
+                antigo.unlink()
+        except OSError:
+            pass
+
+    nome_arquivo = f"aluno_{student_id}_{uuid.uuid4().hex[:8]}{extensao}"
+    destino = STUDENT_PHOTOS_DIR / nome_arquivo
+    with open(destino, "wb") as f:
+        f.write(conteudo)
+
+    student.foto_path = nome_arquivo
+    db.commit()
+    db.refresh(student)
+    return student
+
+
+@router.get("/{student_id}/foto")
+def get_foto_aluno(
+    student_id: int,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """🖼️ Retorna a imagem da foto do aluno."""
+    query = get_students_query(db, current_user)
+    student = query.filter(Student.id == student_id).first()
+    if not student:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Aluno não encontrado ou sem permissão")
+    if not student.foto_path:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Aluno não tem foto")
+    caminho = STUDENT_PHOTOS_DIR / student.foto_path
+    if not caminho.exists():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Arquivo da foto não encontrado")
+    return FileResponse(str(caminho))
+
+
+@router.delete("/{student_id}/foto", status_code=status.HTTP_204_NO_CONTENT)
+def delete_foto_aluno(
+    student_id: int,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """🗑️ Remove a foto do aluno."""
+    query = get_students_query(db, current_user)
+    student = query.filter(Student.id == student_id).first()
+    if not student:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Aluno não encontrado ou sem permissão")
+    if student.foto_path:
+        caminho = STUDENT_PHOTOS_DIR / student.foto_path
+        try:
+            if caminho.exists():
+                caminho.unlink()
+        except OSError:
+            pass
+        student.foto_path = None
+        db.commit()
+    return None

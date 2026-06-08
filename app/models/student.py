@@ -37,6 +37,9 @@ class Student(Base):
     
     notes = Column(Text, nullable=True)  # Observações gerais
     
+    # Foto do aluno (nome do arquivo em backend/storage/student_photos)
+    foto_path = Column(String(255), nullable=True)
+    
     # Professor responsável
     created_by_user_id = Column(Integer, ForeignKey("users.id"))
     

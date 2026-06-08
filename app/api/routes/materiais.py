@@ -18,6 +18,7 @@ from app.schemas.material import (
     MaterialAlunoResponse, AnotacaoRequest, FavoritoRequest
 )
 from app.api.dependencies import get_current_active_user
+from app.core.tenant import enforce_limite_materiais
 from app.core.pagination import PaginationParams, build_page
 from app.services.material_service import material_service
 from app.services.storage_service import storage_service
@@ -89,6 +90,26 @@ def gerar_material_background(material_id: int):
                 # Salvar JSON em arquivo
                 arquivo_path = storage_service.salvar_json(material_id, resultado["json"])
                 print(f"💾 JSON salvo em: storage/{arquivo_path}")
+            else:
+                conteudo_erro = resultado.get("error")
+        
+        elif material_tipo in (
+            TipoMaterial.RESUMO,
+            TipoMaterial.TEXTO_SIMPLIFICADO,
+            TipoMaterial.ROTEIRO_ESTUDO,
+            TipoMaterial.ATIVIDADES,
+        ):
+            resultado = material_service.gerar_material_texto(
+                formato=material_tipo.value,
+                titulo=material_titulo,
+                conteudo=material_prompt,
+                materia=material_materia,
+                serie=material_serie,
+                adaptacoes=adaptacoes
+            )
+            if resultado["success"]:
+                arquivo_path = storage_service.salvar_html(material_id, resultado["html"])
+                print(f"💾 HTML salvo em: storage/{arquivo_path}")
             else:
                 conteudo_erro = resultado.get("error")
         
@@ -181,7 +202,10 @@ async def criar_material(
     Se data_aplicacao for fornecida e criar_evento_agenda=True,
     um evento será criado automaticamente na agenda do professor.
     """
-    
+    # Limite de plano (soft): bloqueia se a escola atingiu o limite mensal de materiais.
+    # Nao afeta usuarios sem escola/assinatura ativa (grandfather).
+    enforce_limite_materiais(db, current_user)
+
     # Verificar se alunos pertencem ao usuário
     alunos = db.query(Student).filter(
         Student.id.in_(material_data.aluno_ids),
@@ -364,17 +388,8 @@ async def obter_conteudo_material(
             detail=f"Material não está disponível. Status: {material.status}"
         )
     
-    # Ler do storage
-    if material.tipo == TipoMaterial.VISUAL:
-        conteudo = storage_service.ler_html(material_id)
-        if not conteudo:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Conteúdo do material não encontrado no storage"
-            )
-        return {"tipo": "html", "conteudo": conteudo}
-    
-    elif material.tipo == TipoMaterial.MAPA_MENTAL:
+    # Ler do storage: mapa mental e JSON; os demais formatos sao HTML
+    if material.tipo == TipoMaterial.MAPA_MENTAL:
         conteudo = storage_service.ler_json(material_id)
         if not conteudo:
             raise HTTPException(
@@ -382,6 +397,14 @@ async def obter_conteudo_material(
                 detail="Conteúdo do material não encontrado no storage"
             )
         return {"tipo": "json", "conteudo": conteudo}
+    else:
+        conteudo = storage_service.ler_html(material_id)
+        if not conteudo:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Conteúdo do material não encontrado no storage"
+            )
+        return {"tipo": "html", "conteudo": conteudo}
 
 
 @router.delete("/{material_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -431,3 +454,128 @@ async def listar_alunos_material(
         )
     
     return material.materiais_alunos
+
+
+@router.post("/{material_id}/regenerar", response_model=MaterialResponse)
+async def regenerar_material(
+    material_id: int,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Regenera o conteudo do material como uma NOVA versao.
+
+    A versao atual e arquivada no historico (preservando o arquivo anterior) e o
+    conteudo e gerado novamente em background. Nao consome cota de plano (e revisao).
+    """
+    material = db.query(Material).filter(
+        Material.id == material_id,
+        Material.criado_por_id == current_user.id
+    ).first()
+
+    if not material:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Material não encontrado"
+        )
+
+    if material.status == StatusMaterial.GERANDO:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="O material ainda está sendo gerado. Aguarde a conclusão."
+        )
+
+    # Arquiva a versao atual (se houver arquivo gerado)
+    ext = "json" if material.tipo == TipoMaterial.MAPA_MENTAL else "html"
+    versao_atual = material.versao or 1
+    arquivo_versao = storage_service.arquivar_versao(material_id, versao_atual, ext)
+
+    historico = list(material.historico_versoes or [])
+    if arquivo_versao:
+        ref_data = material.atualizado_em or material.criado_em
+        historico.append({
+            "versao": versao_atual,
+            "arquivo_path": arquivo_versao,
+            "conteudo_prompt": material.conteudo_prompt,
+            "criado_em": ref_data.isoformat() if ref_data else None,
+        })
+
+    material.historico_versoes = historico
+    material.versao = versao_atual + 1
+    material.status = StatusMaterial.GERANDO
+    db.commit()
+    db.refresh(material)
+
+    # Gera o novo conteudo em background (sobrescreve o arquivo canonico)
+    background_tasks.add_task(gerar_material_background, material.id)
+
+    return material
+
+
+@router.get("/{material_id}/versoes")
+async def listar_versoes_material(
+    material_id: int,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """Lista o historico de versoes do material (versao atual + versoes anteriores arquivadas)."""
+    material = db.query(Material).filter(
+        Material.id == material_id,
+        Material.criado_por_id == current_user.id
+    ).first()
+
+    if not material:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Material não encontrado"
+        )
+
+    versoes_anteriores = list(material.historico_versoes or [])
+    return {
+        "material_id": material.id,
+        "versao_atual": material.versao or 1,
+        "status_atual": material.status,
+        "total_versoes": len(versoes_anteriores) + 1,
+        "versoes_anteriores": versoes_anteriores,
+    }
+
+
+@router.get("/{material_id}/versao/{versao}/conteudo")
+async def obter_conteudo_versao(
+    material_id: int,
+    versao: int,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """Obtem o conteudo de uma versao especifica (atual ou arquivada) do material."""
+    material = db.query(Material).filter(
+        Material.id == material_id,
+        Material.criado_por_id == current_user.id
+    ).first()
+
+    if not material:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Material não encontrado"
+        )
+
+    ext = "json" if material.tipo == TipoMaterial.MAPA_MENTAL else "html"
+
+    if versao == (material.versao or 1):
+        # Versao atual = arquivo canonico
+        conteudo = storage_service.ler_json(material_id) if ext == "json" else storage_service.ler_html(material_id)
+    else:
+        conteudo = storage_service.ler_versao(material_id, versao, ext)
+
+    if conteudo is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Versão não encontrada"
+        )
+
+    return {
+        "tipo": "json" if ext == "json" else "html",
+        "versao": versao,
+        "conteudo": conteudo,
+    }

@@ -8,10 +8,12 @@ from app.database import get_db
 from app.models.escola import Escola, ConfiguracaoEscola
 from app.models.user import User, UserRole
 from app.models.plano import Plano
-from app.models.assinatura import Assinatura
+from app.models.assinatura import Assinatura, Fatura, StatusFatura, StatusAssinatura as StatusAssinaturaDB
 from app.core.config import settings
 from app.core.security import create_access_token, get_password_hash
 from app.core.rate_limit import check_rate_limit
+from app.services.asaas_service import asaas_service, AsaasError
+from app.api.dependencies import get_current_active_user
 from app.schemas.multitenant import CheckoutRequest, CheckoutResponse, StatusAssinatura
 from pydantic import BaseModel, EmailStr
 
@@ -157,6 +159,44 @@ async def iniciar_checkout(
         # 8. Commit de tudo
         db.commit()
         
+        # 8.1 Integracao Asaas (best-effort: NAO bloqueia o onboarding/trial)
+        link_pagamento = None
+        if asaas_service.esta_configurado():
+            try:
+                cliente = asaas_service.criar_cliente(
+                    nome=dados.admin_nome,
+                    email=dados.admin_email,
+                    cpf_cnpj=dados.escola_cnpj or None,
+                    external_reference=str(escola.id),
+                )
+                customer_id = cliente.get("id")
+
+                # Primeira cobranca ao fim do trial; depois segue o ciclo mensal
+                next_due = data_fim_trial.strftime("%Y-%m-%d")
+                assinatura_asaas = asaas_service.criar_assinatura(
+                    customer_id=customer_id,
+                    valor=plano.valor,
+                    descricao=f"AdaptAI - Plano {plano.nome}",
+                    next_due_date=next_due,
+                    billing_type="UNDEFINED",  # cliente escolhe PIX/boleto/cartao
+                    cycle="MONTHLY",
+                    external_reference=str(escola.id),
+                )
+                subscription_id = assinatura_asaas.get("id")
+
+                assinatura.asaas_customer_id = customer_id
+                assinatura.asaas_subscription_id = subscription_id
+                db.commit()
+
+                # Durante o trial pode ainda nao existir cobranca (link None e ok)
+                if subscription_id:
+                    link_pagamento = asaas_service.obter_link_pagamento_assinatura(subscription_id)
+            except AsaasError as e:
+                # Trial ja foi criado; integracao pode ser refeita depois. Apenas registra.
+                print(f"[CHECKOUT/ASAAS] Integracao falhou (trial criado mesmo assim): {e}")
+            except Exception as e:
+                print(f"[CHECKOUT/ASAAS] Erro inesperado na integracao: {type(e).__name__}")
+        
         # 9. Gera token para login automático
         token = criar_token_acesso(usuario.id, usuario.email)
         
@@ -168,7 +208,7 @@ async def iniciar_checkout(
             assinatura_id=assinatura.id,
             status=StatusAssinatura.TRIAL,
             trial_dias=14,
-            link_pagamento=None,  # TODO: Integrar com Asaas
+            link_pagamento=link_pagamento,
             token=token
         )
         
@@ -330,4 +370,139 @@ async def obter_resumo_plano(
             "exportacao_pdf": plano.exportacao_pdf,
             "exportacao_excel": plano.exportacao_excel
         }
+    }
+
+
+# ============================================
+# WEBHOOK ASAAS + LINK DE PAGAMENTO
+# ============================================
+
+def _parse_date_iso(valor):
+    """Converte 'YYYY-MM-DD' (ou datetime ISO) em datetime; None se falhar."""
+    if not valor:
+        return None
+    try:
+        return datetime.strptime(str(valor)[:10], "%Y-%m-%d")
+    except (ValueError, TypeError):
+        return None
+
+
+def _upsert_fatura_paga(db: Session, assinatura: Assinatura, pagamento: dict):
+    """Cria ou atualiza uma Fatura PAGA a partir de um pagamento do Asaas."""
+    payment_id = pagamento.get("id")
+    fatura = None
+    if payment_id:
+        fatura = db.query(Fatura).filter(Fatura.asaas_payment_id == payment_id).first()
+
+    if not fatura:
+        numero = f"ASAAS-{payment_id}" if payment_id else f"ASAAS-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        fatura = Fatura(
+            assinatura_id=assinatura.id,
+            numero=numero,
+            valor=float(pagamento.get("value") or assinatura.valor_mensal or 0),
+            data_vencimento=_parse_date_iso(pagamento.get("dueDate")) or datetime.now(),
+            asaas_payment_id=payment_id,
+        )
+        db.add(fatura)
+
+    fatura.status = StatusFatura.PAGA.value
+    fatura.valor_pago = float(pagamento.get("value") or fatura.valor or 0)
+    fatura.data_pagamento = datetime.now()
+    fatura.metodo_pagamento = pagamento.get("billingType")
+    if pagamento.get("invoiceUrl"):
+        fatura.link_pagamento = pagamento.get("invoiceUrl")
+
+
+@router.post("/webhook/asaas")
+async def webhook_asaas(request: Request, db: Session = Depends(get_db)):
+    """
+    Recebe eventos de cobranca do Asaas e atualiza a assinatura/faturas.
+
+    SEGURANCA: se ASAAS_WEBHOOK_TOKEN estiver configurado, exige o mesmo valor
+    no header 'asaas-access-token' (configurado no painel do Asaas).
+
+    Responde sempre 200 para eventos conhecidos (o Asaas reenvia em caso de erro).
+    """
+    # Validacao do token do webhook (se configurado)
+    if settings.ASAAS_WEBHOOK_TOKEN:
+        token_recebido = request.headers.get("asaas-access-token", "")
+        if token_recebido != settings.ASAAS_WEBHOOK_TOKEN:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token de webhook invalido",
+            )
+
+    try:
+        corpo = await request.json()
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Payload invalido")
+
+    evento = corpo.get("event")
+    pagamento = corpo.get("payment") or {}
+    subscription_id = pagamento.get("subscription")
+    customer_id = pagamento.get("customer")
+
+    # Localiza a assinatura pelo subscription_id (preferencial) ou customer_id
+    assinatura = None
+    if subscription_id:
+        assinatura = db.query(Assinatura).filter(
+            Assinatura.asaas_subscription_id == subscription_id
+        ).first()
+    if not assinatura and customer_id:
+        assinatura = db.query(Assinatura).filter(
+            Assinatura.asaas_customer_id == customer_id
+        ).first()
+
+    if not assinatura:
+        # Nao conhecemos essa assinatura: responde 200 para o Asaas nao reenviar.
+        return {"received": True, "handled": False}
+
+    eventos_pagos = {"PAYMENT_CONFIRMED", "PAYMENT_RECEIVED"}
+    eventos_atraso = {"PAYMENT_OVERDUE"}
+    eventos_problema = {"PAYMENT_REFUNDED", "PAYMENT_DELETED", "PAYMENT_CHARGEBACK_REQUESTED"}
+
+    if evento in eventos_pagos:
+        assinatura.status = StatusAssinaturaDB.ATIVA.value
+        if pagamento.get("billingType"):
+            assinatura.forma_pagamento = pagamento.get("billingType")
+        proximo = _parse_date_iso(pagamento.get("dueDate"))
+        if proximo:
+            assinatura.data_proxima_cobranca = proximo
+        _upsert_fatura_paga(db, assinatura, pagamento)
+    elif evento in eventos_atraso:
+        assinatura.status = StatusAssinaturaDB.ATRASADA.value
+    elif evento in eventos_problema:
+        assinatura.status = StatusAssinaturaDB.PENDENTE.value
+
+    db.commit()
+    return {"received": True, "handled": True, "event": evento}
+
+
+@router.get("/assinatura/link")
+async def obter_link_pagamento_atual(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """
+    Retorna o link da cobranca atual da assinatura da escola do usuario logado.
+    Pode ser None durante o trial (ainda sem cobranca gerada).
+    """
+    if not current_user.escola_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Usuario sem escola vinculada")
+
+    assinatura = db.query(Assinatura).filter(
+        Assinatura.escola_id == current_user.escola_id
+    ).first()
+    if not assinatura:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Assinatura nao encontrada")
+
+    link = None
+    if asaas_service.esta_configurado() and assinatura.asaas_subscription_id:
+        link = asaas_service.obter_link_pagamento_assinatura(assinatura.asaas_subscription_id)
+
+    return {
+        "status": assinatura.status,
+        "link_pagamento": link,
+        "data_proxima_cobranca": assinatura.data_proxima_cobranca.isoformat()
+        if assinatura.data_proxima_cobranca else None,
     }

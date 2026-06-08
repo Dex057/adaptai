@@ -125,6 +125,11 @@ class Settings(BaseSettings):
     # URL base do frontend, usada para montar links em emails (ex: link de reset)
     FRONTEND_URL: str = "http://localhost:5173"
 
+    # Pagamentos (Asaas)
+    ASAAS_API_KEY: str = ""
+    ASAAS_ENV: str = "sandbox"  # "sandbox" ou "production"
+    ASAAS_WEBHOOK_TOKEN: str = ""  # validado no header 'asaas-access-token' do webhook
+
     # CORS - Origens permitidas (separadas por vírgula)
     BACKEND_CORS_ORIGINS: str = "http://localhost:3000,http://localhost:5173,https://*.vercel.app"
 
@@ -136,6 +141,13 @@ class Settings(BaseSettings):
         if self.ENVIRONMENT == "production":
             origins.append("https://*.vercel.app")
         return origins
+
+    @property
+    def asaas_base_url(self) -> str:
+        """URL base da API Asaas conforme o ambiente (sandbox/producao)."""
+        if self.ASAAS_ENV.strip().lower() in ("production", "prod", "producao"):
+            return "https://api.asaas.com/v3"
+        return "https://api-sandbox.asaas.com/v3"
 
     class Config:
         env_file = ".env"

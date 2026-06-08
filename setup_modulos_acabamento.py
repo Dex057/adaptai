@@ -115,6 +115,16 @@ def checar_config():
         if not definido:
             _avisos.append(f"{nome} nao definida (recuperacao de senha por email)")
 
+    # Pagamento (Asaas) - opcional; necessario apenas para cobranca real
+    asaas_def = bool(getattr(settings, "ASAAS_API_KEY", None))
+    print(f"  [opcional]    ASAAS_API_KEY: {'definida' if asaas_def else 'nao definida'}")
+    if asaas_def:
+        print(f"                ASAAS_ENV: {getattr(settings, 'ASAAS_ENV', 'sandbox')}")
+        if not bool(getattr(settings, 'ASAAS_WEBHOOK_TOKEN', None)):
+            _avisos.append("ASAAS_WEBHOOK_TOKEN nao definido (webhook sem validacao de token)")
+    else:
+        _avisos.append("ASAAS_API_KEY nao definida (checkout cria trial mas nao gera cobranca)")
+
 
 def resumo():
     _titulo("RESUMO")
@@ -134,6 +144,8 @@ def resumo():
     print("  - Testar em runtime: geracao por IA, limites de plano, uploads (foto/CSV), anti-abuso.")
     print("  - Construir as telas de frontend das features novas (este script cuida so do backend).")
     print("  - (Opcional) Recuperacao de senha: definir RESEND_API_KEY / EMAIL_FROM / FRONTEND_URL no .env.")
+    print("  - (Opcional) Pagamento Asaas: definir ASAAS_API_KEY / ASAAS_ENV / ASAAS_WEBHOOK_TOKEN no .env e")
+    print("    cadastrar o webhook no painel Asaas apontando para <backend>/api/v1/checkout/webhook/asaas.")
     print("  - (Opcional/limpeza) Remover arquivos orfaos do PEI: pei_novo_endpoint.py, novo_endpoint_pei.txt,")
     print("    e o componente SeletorRelatoriosParaPEI.jsx (nao afetam o funcionamento).")
 
@@ -154,6 +166,10 @@ def main():
     rodar_migracao(
         "aplicar_migracao_materiais_versao.py",
         "3/5 - Migracao: versionamento e novos formatos de materiais",
+    )
+    rodar_migracao(
+        "aplicar_migracao_revoked_tokens.py",
+        "3.1/5 - Migracao: tokens revogados (logout server-side)",
     )
     smoke_import()
     checar_config()

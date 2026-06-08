@@ -1,10 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
 from sqlalchemy.orm import Session
-from datetime import timedelta
+from datetime import timedelta, datetime, timezone
 
 from app.database import get_db
 from app.models.user import User
+from app.models.revoked_token import RevokedToken
 from app.schemas.user import UserCreate, UserResponse, UserLogin, Token
 from app.core.security import (
     verify_password,
@@ -238,6 +239,14 @@ def refresh_access_token(
             detail="Refresh token invalido ou expirado. Faca login novamente.",
         )
     
+    # Revogacao server-side: um refresh token marcado como revogado (logout) e recusado
+    jti = refresh_payload.get("jti")
+    if jti and db.query(RevokedToken).filter(RevokedToken.jti == jti).first():
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Sessao encerrada. Faca login novamente.",
+        )
+    
     email: str = refresh_payload.get("sub", "")
     if not email:
         raise HTTPException(
@@ -274,6 +283,46 @@ def refresh_access_token(
         )
     
     return RefreshResponse(access_token=new_access)
+
+
+# ============================================
+# LOGOUT (revogacao de refresh token)
+# ============================================
+
+class LogoutRequest(BaseModel):
+    refresh_token: str
+
+
+@router.post("/logout")
+def logout(payload: LogoutRequest, db: Session = Depends(get_db)):
+    """
+    Logout server-side: revoga o refresh token informado.
+
+    Best-effort e idempotente - responde 200 mesmo se o token ja estiver
+    invalido/expirado (nao vaza informacao). Apos o logout, o refresh token
+    nao pode mais ser usado em /auth/refresh.
+    """
+    data = decode_refresh_token(payload.refresh_token)
+    if data:
+        jti = data.get("jti")
+        if jti:
+            ja_revogado = db.query(RevokedToken).filter(RevokedToken.jti == jti).first()
+            if not ja_revogado:
+                exp = data.get("exp")
+                expires_at = datetime.fromtimestamp(exp, tz=timezone.utc) if exp else None
+                db.add(RevokedToken(jti=jti, expires_at=expires_at))
+                db.commit()
+            # Limpeza oportunista de tokens ja expirados (mantem a tabela enxuta)
+            try:
+                db.query(RevokedToken).filter(
+                    RevokedToken.expires_at.isnot(None),
+                    RevokedToken.expires_at < datetime.now(timezone.utc),
+                ).delete(synchronize_session=False)
+                db.commit()
+            except Exception:
+                db.rollback()
+    return {"message": "Logout efetuado."}
+
 
 # ============= ENDPOINTS PARA ESTUDANTES =============
 

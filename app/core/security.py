@@ -16,6 +16,7 @@ from jose import JWTError, jwt
 import bcrypt
 import hashlib
 import hmac
+import uuid
 from app.core.config import settings
 
 
@@ -63,10 +64,11 @@ def create_refresh_token(data: dict) -> str:
     Cria refresh token JWT com TTL longo (7 dias).
     
     Deve ser usado APENAS para chamar POST /auth/refresh e obter novo access token.
+    Inclui um 'jti' (id unico) para permitir revogacao server-side no logout.
     """
     to_encode = data.copy()
     expire = datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
-    to_encode.update({"exp": expire, "type": "refresh"})
+    to_encode.update({"exp": expire, "type": "refresh", "jti": uuid.uuid4().hex})
     encoded_jwt = jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
     return encoded_jwt
 

@@ -11,6 +11,7 @@ from pathlib import Path
 
 from app.database import get_db
 from app.core.config import settings
+from app.core.anthropic_client import get_default_model
 from app.api.dependencies import get_current_active_user
 from app.models.user import User
 from app.models.student import Student
@@ -198,7 +199,7 @@ IMPORTANTE:
         print(f"🤖 Gerando análise consolidada para {student.name}...")
         
         message = client.messages.create(
-            model="claude-3-5-sonnet-20241022",
+            model=get_default_model(),
             max_tokens=8000,
             messages=[
                 {

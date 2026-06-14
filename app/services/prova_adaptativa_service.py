@@ -6,6 +6,7 @@ import anthropic
 from typing import Dict, List
 from sqlalchemy.orm import Session
 from app.core.config import settings
+from app.core.anthropic_client import get_fast_model
 from app.models.prova import Prova, QuestaoGerada, ProvaAluno, TipoQuestao, DificuldadeQuestao, StatusProva
 from app.models.analise_qualitativa import AnaliseQualitativa
 import json
@@ -18,7 +19,9 @@ class ProvaAdaptativaService:
     
     def __init__(self):
         self._client = None
-        self.model = "claude-3-haiku-20240307"
+        # Modelo rapido/barato (tier Haiku) - antes 'claude-3-haiku-20240307',
+        # aposentado em 20/04/2026. get_fast_model() resolve o Haiku atual.
+        self.model = get_fast_model()
     
     @property
     def client(self):

@@ -5,6 +5,7 @@ Analisa respostas dos alunos e gera insights sobre o que melhorar
 import anthropic
 from typing import Dict, List
 from app.core.config import settings
+from app.core.anthropic_client import get_fast_model
 from app.models.prova import ProvaAluno, RespostaAluno, QuestaoGerada, StatusProvaAluno
 
 
@@ -15,7 +16,9 @@ class AnaliseQualitativaService:
     
     def __init__(self):
         self._client = None
-        self.model = "claude-3-haiku-20240307"
+        # Modelo rapido/barato (tier Haiku) - antes 'claude-3-haiku-20240307',
+        # que foi aposentado em 20/04/2026. get_fast_model() resolve o Haiku atual.
+        self.model = get_fast_model()
     
     @property
     def client(self):

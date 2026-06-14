@@ -93,9 +93,9 @@ def get_default_model() -> str:
     Retorna o modelo Claude padrao para tarefas complexas.
     Controlado por settings.CLAUDE_MODEL.
     
-    Fallback: claude-3-5-sonnet-20241022 (modelo mais capaz estavel).
+    Fallback: claude-sonnet-4-6 (modelo balanceado atual; geracao 3.x foi aposentada).
     """
-    return settings.CLAUDE_MODEL or "claude-3-5-sonnet-20241022"
+    return settings.CLAUDE_MODEL or "claude-sonnet-4-6"
 
 
 def get_fast_model() -> str:
@@ -103,6 +103,6 @@ def get_fast_model() -> str:
     Retorna um modelo Claude rapido/barato para tarefas simples
     (classificacao, extracao de campos, resumos curtos).
     
-    Nao e sobrescrito por config - sempre usa Haiku por ser o mais rapido.
+    Nao e sobrescrito por config - sempre usa Haiku (4.5) por ser o mais rapido.
     """
-    return "claude-3-haiku-20240307"
+    return "claude-haiku-4-5-20251001"

@@ -7,7 +7,7 @@ Uso tipico: envolve o client.messages.create() com lookup+salvamento automatico.
     
     response = cached_completion(
         prompt="Gere um mapa mental de fotossintese para 7o ano",
-        model="claude-3-5-sonnet-20241022",
+        model="claude-sonnet-4-6",
         max_tokens=2048,
         cache_type="mapa_mental",
         ttl_hours=168,  # 7 dias

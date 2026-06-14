@@ -117,7 +117,7 @@ class Settings(BaseSettings):
 
     # Claude API (Anthropic)
     ANTHROPIC_API_KEY: str = ""
-    CLAUDE_MODEL: str = "claude-3-haiku-20240307"
+    CLAUDE_MODEL: str = "claude-sonnet-4-6"
 
     # Email transacional (Resend) - usado para recuperacao de senha
     RESEND_API_KEY: str = ""

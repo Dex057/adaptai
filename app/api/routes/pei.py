@@ -7,7 +7,7 @@ from pathlib import Path
 
 from app.database import get_db
 from app.core.config import settings
-from app.core.anthropic_client import get_anthropic_client
+from app.core.anthropic_client import get_anthropic_client, get_default_model
 from app.core.rate_limit import check_rate_limit
 from app.core.logging_config import get_logger
 from app.api.dependencies import get_current_active_user
@@ -22,8 +22,9 @@ router = APIRouter(prefix="/pei", tags=["PEI - Plano Educacional Individualizado
 # Diretorio de relatorios
 RELATORIOS_DIR = Path(__file__).parent.parent.parent.parent / "storage" / "relatorios"
 
-# Modelo que suporta PDFs e imagens (controlado via settings.CLAUDE_MODEL)
-MODELO_VISAO = "claude-3-5-sonnet-20241022"
+# Modelo que suporta PDFs e imagens (controlado via settings.CLAUDE_MODEL).
+# Antes cravava 'claude-3-5-sonnet-20241022', aposentado em 28/10/2025.
+MODELO_VISAO = get_default_model()
 
 
 @router.post("/analisar-laudo")
@@ -238,8 +239,8 @@ Analise o documento com atenção e extraia todas as informações relevantes pa
 
 
 # Modelo usado para consolidar o PEI a partir de relatorios (apenas texto, sem visao).
-# Mantido separado de MODELO_VISAO porque aqui nao ha PDF/imagem para processar.
-MODELO_PEI_TEXTO = "claude-sonnet-4-20250514"
+# Antes cravava 'claude-sonnet-4-20250514' (Sonnet 4, retirement em 15/06/2026).
+MODELO_PEI_TEXTO = get_default_model()
 
 
 @router.post("/gerar-pei-de-relatorios")

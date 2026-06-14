@@ -9,6 +9,7 @@ from datetime import datetime, date, timedelta
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core.anthropic_client import get_default_model
 from app.core.logging_config import get_logger
 from app.models.student import Student
 from app.models.curriculo import CurriculoNacional, MapeamentoPrerequisitos
@@ -21,7 +22,10 @@ logger = get_logger(__name__)
 
 # Cliente Anthropic (inicialização lazy)
 _client = None
-MODELO_IA = "claude-sonnet-4-20250514"
+# Modelo (tier capaz). Antes cravava 'claude-sonnet-4-20250514' (Sonnet 4),
+# que entra em retirement em 15/06/2026. get_default_model() resolve o modelo
+# configurado no ambiente (settings.CLAUDE_MODEL), igual ao completo_service.
+MODELO_IA = get_default_model()
 
 
 def get_anthropic_client():

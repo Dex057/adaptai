@@ -60,3 +60,7 @@ TESTAR_*.py
 VERIFICAR_*.py
 CRIAR_*.py
 RECRIAR_*.py
+
+# Arquivamento reversivel (codigo morto movido para ca - nao versionar nem deployar).
+# Reversivel via historico do git e pelos arquivos no disco em _archive/.
+_archive/

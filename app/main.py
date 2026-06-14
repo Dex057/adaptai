@@ -48,6 +48,7 @@ from app.api.routes import checkout  # CHECKOUT / ONBOARDING DE NOVAS ESCOLAS
 from app.api.routes import relatorios_v2  # RELATÓRIOS V2 - UPLOAD ULTRA-RÁPIDO COM WEBSOCKET
 from app.api.routes import websocket  # WEBSOCKET - NOTIFICAÇÕES EM TEMPO REAL
 from app.api.routes import admin_monitoring  # ADMIN - MONITORAMENTO (cache IA, background tasks)
+from app.api.routes import seduc  # PAINEL SEDUC - VISAO DE REDE (agregado de escolas)
 
 # Criar tabelas APENAS em dev. Em producao, o schema e versionado via Alembic
 # e NAO deve ser alterado pelo app no startup - rodar create_all em prod mascara
@@ -323,6 +324,7 @@ app.include_router(checkout.router, prefix="/api/v1", tags=["🛒 Checkout"])
 app.include_router(relatorios_v2.router, prefix="/api/v1", tags=["📋 Relatórios V2 Ultra-Rápido"])
 app.include_router(websocket.router, prefix="/api/v1", tags=["🔌 WebSocket"])
 app.include_router(admin_monitoring.router, prefix="/api/v1", tags=["⚙️ Admin Monitoring"])
+app.include_router(seduc.router, prefix="/api/v1", tags=["🗺️ Painel SEDUC"])
 
 # ============================================
 # Rotas principais

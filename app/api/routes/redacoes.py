@@ -262,6 +262,13 @@ def listar_redacoes_do_tema(
     """
     📋 Listar todas as redações de um tema
     """
+    # SEGURANCA: so o dono do tema (ou super_admin) ve as redacoes/alunos dele
+    tema = db.query(TemaRedacao).filter(TemaRedacao.id == tema_id).first()
+    if not tema:
+        raise HTTPException(status_code=404, detail="Tema não encontrado")
+    from app.models.user import UserRole
+    if current_user.role != UserRole.SUPER_ADMIN and tema.criado_por_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Sem permissão para ver as redações deste tema")
     redacoes = db.query(RedacaoAluno).filter(RedacaoAluno.tema_id == tema_id).all()
     
     resultado = []
@@ -332,6 +339,8 @@ def listar_temas_disponiveis_aluno(
     """
     📚 Listar temas disponíveis para o aluno
     """
+    # SEGURANCA: valida acesso ao aluno (evita IDOR)
+    verificar_acesso_aluno(db, aluno_id, current_user)
     redacoes = db.query(RedacaoAluno).filter(
         RedacaoAluno.aluno_id == aluno_id,
         RedacaoAluno.status.in_([StatusRedacao.RASCUNHO, StatusRedacao.SUBMETIDA])
@@ -351,6 +360,8 @@ def obter_redacao_aluno(
     """
     📄 Obter redação do aluno para um tema
     """
+    # SEGURANCA: valida acesso ao aluno (evita IDOR)
+    verificar_acesso_aluno(db, aluno_id, current_user)
     redacao = db.query(RedacaoAluno).filter(
         RedacaoAluno.aluno_id == aluno_id,
         RedacaoAluno.tema_id == tema_id
@@ -408,6 +419,9 @@ def salvar_rascunho(
     if not redacao:
         raise HTTPException(status_code=404, detail="Redação não encontrada")
     
+    # SEGURANCA: valida acesso ao aluno dono da redacao (evita IDOR)
+    verificar_acesso_aluno(db, redacao.aluno_id, current_user)
+    
     if redacao.status not in [StatusRedacao.RASCUNHO]:
         raise HTTPException(status_code=400, detail="Redação já foi submetida")
     
@@ -448,6 +462,9 @@ async def submeter_redacao(
         
         if not redacao:
             raise HTTPException(status_code=404, detail="Redação não encontrada")
+        
+        # SEGURANCA: valida acesso ao aluno dono da redacao (evita IDOR)
+        verificar_acesso_aluno(db, redacao.aluno_id, current_user)
         
         if redacao.status == StatusRedacao.CORRIGIDA:
             raise HTTPException(status_code=400, detail="Redação já foi corrigida")
@@ -566,7 +583,7 @@ async def submeter_redacao(
         print(f"[ERRO] Erro ao submeter redação: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Erro ao corrigir redação: {str(e)}"
+            detail="Erro ao corrigir redação. Tente novamente."
         )
     finally:
         db.close()
@@ -581,6 +598,8 @@ def obter_historico_aluno(
     """
     📊 Obter histórico completo de redações do aluno
     """
+    # SEGURANCA: valida acesso ao aluno (evita IDOR)
+    verificar_acesso_aluno(db, aluno_id, current_user)
     redacoes = db.query(RedacaoAluno).filter(
         RedacaoAluno.aluno_id == aluno_id
     ).order_by(RedacaoAluno.iniciado_em.desc()).all()
@@ -728,6 +747,8 @@ def obter_resultado_redacao(
     """
     📝 Obter resultado detalhado de uma redação corrigida
     """
+    # SEGURANCA: valida acesso ao aluno (evita IDOR)
+    verificar_acesso_aluno(db, aluno_id, current_user)
     redacao = db.query(RedacaoAluno).filter(
         RedacaoAluno.id == redacao_id,
         RedacaoAluno.aluno_id == aluno_id

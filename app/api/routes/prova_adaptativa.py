@@ -104,7 +104,7 @@ def gerar_prova_reforco_manual(
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Erro ao gerar prova de reforço: {str(e)}"
+            detail="Erro ao gerar prova de reforço. Tente novamente mais tarde."
         )
 
 

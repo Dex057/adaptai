@@ -20,7 +20,7 @@ import asyncio
 
 from app.database import get_db, SessionLocal
 from app.core.config import settings
-from app.api.dependencies import get_current_active_user
+from app.api.dependencies import get_current_active_user, verificar_acesso_aluno
 from app.models.user import User
 from app.models.student import Student
 from app.models.relatorio import Relatorio
@@ -249,8 +249,19 @@ async def listar_relatorios(
     """Lista todos os relatórios"""
     query = db.query(Relatorio)
     
-    if student_id:
+    if student_id is not None:
+        # SEGURANCA: acesso explicito a um aluno exige ownership (evita IDOR/LGPD)
+        verificar_acesso_aluno(db, student_id, current_user)
         query = query.filter(Relatorio.student_id == student_id)
+    else:
+        # Sem aluno especifico: restringe aos relatorios de alunos acessiveis pelo papel.
+        from app.models.user import UserRole
+        if current_user.role != UserRole.SUPER_ADMIN:
+            query = query.join(Student, Relatorio.student_id == Student.id)
+            if current_user.role in (UserRole.ADMIN, UserRole.COORDINATOR) and current_user.escola_id:
+                query = query.filter(Student.escola_id == current_user.escola_id)
+            else:
+                query = query.filter(Student.created_by_user_id == current_user.id)
     
     total = query.count()
     relatorios = query.order_by(Relatorio.created_at.desc()).offset(skip).limit(limit).all()
@@ -312,6 +323,9 @@ async def obter_arquivo_relatorio(
     if not relatorio:
         raise HTTPException(status_code=404, detail="Relatório não encontrado")
     
+    # SEGURANCA: valida acesso ao aluno dono do laudo (IDOR/LGPD)
+    verificar_acesso_aluno(db, relatorio.student_id, current_user)
+    
     if hasattr(relatorio, 'arquivo_path') and relatorio.arquivo_path:
         file_path = RELATORIOS_DIR / relatorio.arquivo_path
         if file_path.exists():
@@ -335,6 +349,9 @@ async def obter_relatorio(
     
     if not relatorio:
         raise HTTPException(status_code=404, detail="Relatório não encontrado")
+    
+    # SEGURANCA: valida acesso ao aluno dono do laudo (IDOR/LGPD)
+    verificar_acesso_aluno(db, relatorio.student_id, current_user)
     
     dados_extraidos = relatorio.dados_extraidos
     condicoes = relatorio.condicoes
@@ -390,6 +407,9 @@ async def excluir_relatorio(
     if not relatorio:
         raise HTTPException(status_code=404, detail="Relatório não encontrado")
     
+    # SEGURANCA: valida acesso ao aluno dono do laudo antes de excluir (IDOR/LGPD)
+    verificar_acesso_aluno(db, relatorio.student_id, current_user)
+    
     if hasattr(relatorio, 'arquivo_path') and relatorio.arquivo_path:
         file_path = RELATORIOS_DIR / relatorio.arquivo_path
         if file_path.exists():
@@ -428,9 +448,8 @@ async def upload_e_analisar_relatorio(
     # Limite de plano (soft): bloqueia se a escola atingiu o limite mensal de relatorios.
     enforce_limite_relatorios(db, current_user)
 
-    student = db.query(Student).filter(Student.id == student_id).first()
-    if not student:
-        raise HTTPException(status_code=404, detail="Aluno não encontrado")
+    # SEGURANCA: valida que o usuario tem acesso a este aluno (evita IDOR + LGPD)
+    student = verificar_acesso_aluno(db, student_id, current_user)
     
     content_type = arquivo.content_type
     allowed_types = ["application/pdf", "image/jpeg", "image/png", "image/jpg", "image/webp"]

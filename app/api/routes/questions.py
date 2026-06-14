@@ -57,7 +57,7 @@ async def generate_questions(
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error generating questions: {str(e)}"
+            detail="Erro ao gerar questões. Tente novamente mais tarde."
         )
 
 @router.get("/", response_model=List[QuestionSetListResponse])

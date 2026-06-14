@@ -224,6 +224,9 @@ async def verificar_duplicata(
     Verifica se já existe um relatório com o mesmo hash para este aluno
     Retorna informações do relatório existente se houver duplicata
     """
+    # SEGURANCA: valida acesso ao aluno (laudo e dado sensivel de saude - LGPD)
+    verificar_acesso_aluno(db, student_id, current_user)
+
     # Buscar relatórios deste aluno
     relatorios = db.query(Relatorio).filter(
         Relatorio.student_id == student_id
@@ -257,6 +260,9 @@ async def listar_arquivos_aluno(
     Lista todos os arquivos já carregados para um aluno específico
     Retorna nome do arquivo e resumo
     """
+    # SEGURANCA: valida acesso ao aluno (laudo e dado sensivel de saude - LGPD)
+    verificar_acesso_aluno(db, student_id, current_user)
+
     relatorios = db.query(Relatorio).filter(
         Relatorio.student_id == student_id
     ).order_by(Relatorio.created_at.desc()).all()
@@ -307,8 +313,19 @@ async def listar_relatorios(
     """
     query = db.query(Relatorio)
     
-    if student_id:
+    if student_id is not None:
+        # SEGURANCA: acesso explicito a um aluno exige ownership (evita IDOR/LGPD)
+        verificar_acesso_aluno(db, student_id, current_user)
         query = query.filter(Relatorio.student_id == student_id)
+    else:
+        # Sem aluno especifico: restringe aos relatorios de alunos acessiveis pelo papel.
+        from app.models.user import UserRole
+        if current_user.role != UserRole.SUPER_ADMIN:
+            query = query.join(Student, Relatorio.student_id == Student.id)
+            if current_user.role in (UserRole.ADMIN, UserRole.COORDINATOR) and current_user.escola_id:
+                query = query.filter(Student.escola_id == current_user.escola_id)
+            else:
+                query = query.filter(Student.created_by_user_id == current_user.id)
     
     query = query.order_by(Relatorio.created_at.desc())
     
@@ -366,28 +383,10 @@ async def listar_relatorios(
     return page
 
 
-@router.get("/{relatorio_id}/arquivo")
-async def obter_arquivo_relatorio(
-    relatorio_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
-):
-    """Download do arquivo PDF"""
-    relatorio = db.query(Relatorio).filter(Relatorio.id == relatorio_id).first()
-    
-    if not relatorio:
-        raise HTTPException(status_code=404, detail="Relatório não encontrado")
-    
-    if hasattr(relatorio, 'arquivo_path') and relatorio.arquivo_path:
-        file_path = RELATORIOS_DIR / relatorio.arquivo_path
-        if file_path.exists():
-            return FileResponse(
-                path=file_path,
-                filename=relatorio.arquivo_nome,
-                media_type=relatorio.arquivo_tipo
-            )
-    
-    raise HTTPException(status_code=404, detail="Arquivo não encontrado")
+# NOTA (seguranca/LGPD): a rota GET /{relatorio_id}/arquivo INSEGURA foi removida.
+# Ela nao checava ownership e, por ser definida antes, sombreava a versao segura
+# (baixar_arquivo_relatorio, mais abaixo, com verificar_acesso_aluno + protecao a
+# path traversal). Agora a versao segura e a unica que responde por essa rota.
 
 
 @router.get("/{relatorio_id}")
@@ -401,6 +400,9 @@ async def obter_relatorio(
     
     if not relatorio:
         raise HTTPException(status_code=404, detail="Relatório não encontrado")
+    
+    # SEGURANCA: valida acesso ao aluno dono do laudo (IDOR/LGPD)
+    verificar_acesso_aluno(db, relatorio.student_id, current_user)
     
     # Carregar JSON se existir
     dados_extraidos = relatorio.dados_extraidos
@@ -458,6 +460,9 @@ async def excluir_relatorio(
     if not relatorio:
         raise HTTPException(status_code=404, detail="Relatório não encontrado")
     
+    # SEGURANCA: valida acesso ao aluno dono do laudo antes de excluir (IDOR/LGPD)
+    verificar_acesso_aluno(db, relatorio.student_id, current_user)
+    
     # Excluir PDF
     if hasattr(relatorio, 'arquivo_path') and relatorio.arquivo_path:
         file_path = RELATORIOS_DIR / relatorio.arquivo_path
@@ -496,10 +501,8 @@ async def upload_e_analisar_relatorio(
     # Limite de plano (soft): bloqueia se a escola atingiu o limite mensal de relatorios.
     enforce_limite_relatorios(db, current_user)
 
-    # Verificar se aluno existe
-    student = db.query(Student).filter(Student.id == student_id).first()
-    if not student:
-        raise HTTPException(status_code=404, detail="Aluno não encontrado")
+    # SEGURANCA: valida que o usuario tem acesso a este aluno (evita IDOR + LGPD)
+    student = verificar_acesso_aluno(db, student_id, current_user)
     
     # Verificar tipo de arquivo
     content_type = arquivo.content_type
@@ -672,10 +675,8 @@ async def upload_e_analisar_rapido(
     # Limite de plano (soft): bloqueia se a escola atingiu o limite mensal de relatorios.
     enforce_limite_relatorios(db, current_user)
 
-    # Verificar aluno
-    student = db.query(Student).filter(Student.id == student_id).first()
-    if not student:
-        raise HTTPException(status_code=404, detail="Aluno não encontrado")
+    # SEGURANCA: valida que o usuario tem acesso a este aluno (evita IDOR + LGPD)
+    student = verificar_acesso_aluno(db, student_id, current_user)
 
     content_type = arquivo.content_type
     allowed_types = ["application/pdf", "image/jpeg", "image/png", "image/jpg", "image/webp"]

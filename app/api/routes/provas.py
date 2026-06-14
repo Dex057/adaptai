@@ -38,10 +38,24 @@ from app.schemas.prova import (
     QuestaoParaAluno
 )
 from app.services.prova_ai_service import prova_ai_service, ProvaIAError
-from app.api.dependencies import get_current_user, oauth2_scheme, get_user_from_token
+from app.api.dependencies import get_current_user, oauth2_scheme, get_user_from_token, verificar_acesso_aluno
 from app.core.tenant import enforce_limite_provas
 
 router = APIRouter(prefix="/provas")
+
+
+def _verificar_acesso_prova(prova, current_user) -> None:
+    """SEGURANCA (anti-IDOR): garante que o usuario e dono da prova (criada por
+    ele) ou super_admin. Levanta 403 caso contrario. Espelha o padrao ja usado
+    em professor_analytics.py e prova_adaptativa.py."""
+    from app.models.user import UserRole
+    if current_user.role == UserRole.SUPER_ADMIN:
+        return
+    if prova.criado_por_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Voce nao tem permissao para acessar esta prova"
+        )
 
 
 # ============= ENDPOINTS ADMIN =============
@@ -206,7 +220,7 @@ Por favor, adapte as questões considerando:
         print(f"[ERRO] Erro ao gerar prova: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Erro ao gerar prova: {str(e)}"
+            detail="Erro ao gerar prova. Tente novamente mais tarde."
         )
 
 
@@ -217,8 +231,12 @@ def listar_provas(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """📋 Listar todas as provas criadas"""
-    provas = db.query(Prova).offset(skip).limit(limit).all()
+    """📋 Listar as provas criadas pelo usuario (super_admin ve todas)"""
+    from app.models.user import UserRole
+    query = db.query(Prova)
+    if current_user.role != UserRole.SUPER_ADMIN:
+        query = query.filter(Prova.criado_por_id == current_user.id)
+    provas = query.offset(skip).limit(limit).all()
     return provas
 
 
@@ -237,6 +255,7 @@ def obter_prova(
             detail="Prova não encontrada"
         )
     
+    _verificar_acesso_prova(prova, current_user)
     return prova
 
 
@@ -255,6 +274,8 @@ def atualizar_prova(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Prova não encontrada"
         )
+    
+    _verificar_acesso_prova(prova, current_user)
     
     # Atualiza campos
     for field, value in prova_update.dict(exclude_unset=True).items():
@@ -283,6 +304,8 @@ def deletar_prova(
             detail="Prova não encontrada"
         )
     
+    _verificar_acesso_prova(prova, current_user)
+    
     db.delete(prova)
     db.commit()
     
@@ -310,14 +333,11 @@ def associar_prova_ao_aluno(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Prova não encontrada"
         )
+    # SEGURANCA: so o dono da prova pode associa-la (evita IDOR)
+    _verificar_acesso_prova(prova, current_user)
     
-    # Verifica se aluno existe
-    aluno = db.query(Student).filter(Student.id == associacao.aluno_id).first()
-    if not aluno:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Aluno não encontrado"
-        )
+    # Verifica se aluno existe (e se o usuario tem acesso a ele - evita IDOR)
+    aluno = verificar_acesso_aluno(db, associacao.aluno_id, current_user)
     
     # Verifica se já está associado
     ja_associado = db.query(ProvaAluno).filter(
@@ -355,6 +375,8 @@ def listar_provas_do_aluno(
     current_user: User = Depends(get_current_user)
 ):
     """📚 Listar todas as provas de um aluno"""
+    # SEGURANCA: valida acesso ao aluno (evita IDOR)
+    verificar_acesso_aluno(db, aluno_id, current_user)
     provas_aluno = db.query(ProvaAluno).filter(
         ProvaAluno.aluno_id == aluno_id
     ).all()
@@ -383,6 +405,7 @@ def obter_prova_para_fazer(
             detail="Prova não encontrada"
         )
     
+    _verificar_acesso_prova(prova_aluno.prova, current_user)
     prova = prova_aluno.prova
     
     # Monta questões sem respostas
@@ -425,6 +448,8 @@ def iniciar_prova(
             detail="Prova não encontrada"
         )
     
+    _verificar_acesso_prova(prova_aluno.prova, current_user)
+    
     if prova_aluno.status != StatusProvaAluno.PENDENTE:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -462,6 +487,8 @@ async def finalizar_prova(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Prova não encontrada"
         )
+    
+    _verificar_acesso_prova(prova_aluno.prova, current_user)
     
     if prova_aluno.status == StatusProvaAluno.CONCLUIDA:
         raise HTTPException(
@@ -612,6 +639,8 @@ def obter_resultado(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Prova não encontrada"
         )
+    
+    _verificar_acesso_prova(prova_aluno.prova, current_user)
     
     if prova_aluno.status not in [StatusProvaAluno.CONCLUIDA, StatusProvaAluno.CORRIGIDA]:
         raise HTTPException(

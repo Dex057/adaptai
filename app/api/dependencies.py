@@ -38,10 +38,17 @@ def get_user_from_token(token: str) -> User:
         user = db.query(User).filter(User.email == email).first()
         if user is None:
             raise credentials_exception
-        
+
+        # Mesma blindagem de get_current_user: recusa conta desativada.
+        if not user.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Usuario desativado. Entre em contato com o administrador."
+            )
+
         # Forca carregamento dos atributos antes de fechar
         _ = user.id, user.email, user.name, user.role, user.is_active
-        
+
         return user
     finally:
         db.close()
@@ -74,7 +81,19 @@ async def get_current_user(
     user = db.query(User).filter(User.email == email).first()
     if user is None:
         raise credentials_exception
-    
+
+    # SEGURANCA (defesa em profundidade): bloquear conta desativada JA na base.
+    # Antes, get_current_user nao checava is_active - so get_current_active_user
+    # checava. Como alguns pontos usam get_current_user direto (escolas.py admin,
+    # planos.py, e get_tenant_context, que e a base de TODAS as rotas multi-tenant),
+    # um usuario desativado continuava acessando dados da escola ate o token expirar.
+    # Agora qualquer rota autenticada por esta dependencia recusa conta inativa.
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Usuario desativado. Entre em contato com o administrador."
+        )
+
     return user
 
 async def get_current_active_user(
@@ -82,7 +101,11 @@ async def get_current_active_user(
 ) -> User:
     """
     Retorna o usuario atual se estiver ativo.
-    Bloqueia usuarios com is_active=False.
+
+    NOTA: desde a blindagem de get_current_user, a checagem de is_active ja
+    ocorre na base. Esta dependencia e mantida por compatibilidade (varias
+    rotas a importam) e como redundancia explicita - documenta a intencao
+    de 'exigir usuario ativo' no ponto de uso.
     """
     if not current_user.is_active:
         raise HTTPException(

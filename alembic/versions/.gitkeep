@@ -1,0 +1,2 @@
+# Mantem a pasta versions/ no controle de versao mesmo vazia.
+# As migrations geradas pelo Alembic vivem aqui.

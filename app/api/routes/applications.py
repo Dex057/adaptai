@@ -160,13 +160,18 @@ def start_application(
 def submit_answer(
     application_id: int,
     answer_data: StudentAnswerCreate,
+    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """
     Submeter uma resposta do aluno
     """
+    # SEGURANCA: exige auth + ownership. O frontend ja envia o token do professor
+    # que aplicou a atividade (applications.js -> api.js). Antes este endpoint NAO
+    # tinha auth: qualquer um forjava respostas em qualquer application_id.
     application = db.query(Application).filter(
-        Application.id == application_id
+        Application.id == application_id,
+        Application.applied_by_user_id == current_user.id
     ).first()
     
     if not application:
@@ -222,13 +227,16 @@ def submit_answer(
 def submit_answers_batch(
     application_id: int,
     batch_data: AnswerSubmitBatch,
+    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """
     Submeter múltiplas respostas de uma vez
     """
+    # SEGURANCA: exige auth + ownership (mesmo motivo de submit_answer acima).
     application = db.query(Application).filter(
-        Application.id == application_id
+        Application.id == application_id,
+        Application.applied_by_user_id == current_user.id
     ).first()
     
     if not application:
@@ -327,7 +335,7 @@ def complete_application(
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error analyzing performance: {str(e)}"
+            detail="Erro ao analisar desempenho. Tente novamente mais tarde."
         )
 
 @router.delete("/{application_id}", status_code=status.HTTP_204_NO_CONTENT)

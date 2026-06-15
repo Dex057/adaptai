@@ -50,6 +50,9 @@ from app.api.routes import checkout  # CHECKOUT / ONBOARDING DE NOVAS ESCOLAS
 # backend/_archive/websocket_subsystem/. Ver historico git para restaurar.
 from app.api.routes import admin_monitoring  # ADMIN - MONITORAMENTO (cache IA, background tasks)
 from app.api.routes import seduc  # PAINEL SEDUC - VISAO DE REDE (agregado de escolas)
+from app.api.routes import comunicacao  # COMUNICACAO COM A FAMILIA (IA)
+from app.api.routes import plano_aula  # PLANO DE AULA SIMPLES (IA - mobile)
+from app.api.routes import redacao_feedback  # REDACAO FEEDBACK FORMATIVO (IA - mobile)
 
 # Criar tabelas APENAS em dev. Em producao, o schema e versionado via Alembic
 # e NAO deve ser alterado pelo app no startup - rodar create_all em prod mascara
@@ -324,6 +327,9 @@ app.include_router(redacoes.router, prefix="/api/v1", tags=["✍️ Redações E
 app.include_router(checkout.router, prefix="/api/v1", tags=["🛒 Checkout"])
 app.include_router(admin_monitoring.router, prefix="/api/v1", tags=["⚙️ Admin Monitoring"])
 app.include_router(seduc.router, prefix="/api/v1", tags=["🗺️ Painel SEDUC"])
+app.include_router(comunicacao.router, prefix="/api/v1", tags=["💬 Comunicação"])
+app.include_router(plano_aula.router, prefix="/api/v1", tags=["📖 Plano de aula"])
+app.include_router(redacao_feedback.router, prefix="/api/v1", tags=["✍️ Redação (feedback)"])
 
 # ============================================
 # Rotas principais

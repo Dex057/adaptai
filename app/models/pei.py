@@ -59,6 +59,8 @@ class PEI(Base):
     id = Column(Integer, primary_key=True, index=True)
     student_id = Column(Integer, ForeignKey("students.id"), nullable=False, index=True)
     created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    # Tenant denormalizado (Tarefa 1.0): escola fixada na criacao do recurso.
+    escola_id = Column(Integer, ForeignKey("escolas.id"), nullable=True, index=True)
     
     # Período
     ano_letivo = Column(String(10))  # "2025"

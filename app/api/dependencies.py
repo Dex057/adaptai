@@ -1,4 +1,4 @@
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, status, Request
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 from jose import JWTError
@@ -97,22 +97,39 @@ async def get_current_user(
     return user
 
 async def get_current_active_user(
-    current_user: User = Depends(get_current_user)
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> User:
-    """
-    Retorna o usuario atual se estiver ativo.
-
-    NOTA: desde a blindagem de get_current_user, a checagem de is_active ja
-    ocorre na base. Esta dependencia e mantida por compatibilidade (varias
-    rotas a importam) e como redundancia explicita - documenta a intencao
-    de 'exigir usuario ativo' no ponto de uso.
-    """
+    """Retorna o usuario atual se ativo. ViewAs (1.3): resolve o header de
+    impersonacao de forma fail-closed (so SUPER_ADMIN + escola valida)."""
     if not current_user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Usuario desativado. Entre em contato com o administrador."
-        )
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+            detail="Usuario desativado. Entre em contato com o administrador.")
+    _resolver_view_as(request, current_user, db)
     return current_user
+
+
+VIEW_AS_HEADER = "X-View-As-Escola"
+
+
+def _resolver_view_as(request: Request, current_user: User, db: Session) -> None:
+    """Resolve o tenant efetivo via header ViewAs - FAIL-CLOSED. So SUPER_ADMIN
+    com escola existente/ativa ativa o ViewAs; qualquer outro papel: ignorado."""
+    from app.models.user import UserRole
+    from app.models.escola import Escola
+    header = request.headers.get(VIEW_AS_HEADER)
+    if not header:
+        return
+    if current_user.role != UserRole.SUPER_ADMIN:
+        return
+    try:
+        escola_id = int(header)
+    except (TypeError, ValueError):
+        return
+    escola = db.query(Escola).filter(Escola.id == escola_id, Escola.ativa == True).first()  # noqa: E712
+    if escola:
+        current_user.view_as_escola_id = escola_id
 
 def require_teacher(
     current_user: User = Depends(get_current_active_user)
@@ -265,6 +282,18 @@ def verificar_acesso_objetivo_pei(db, objetivo_id: int, current_user: User):
     
     verificar_acesso_aluno(db, pei.student_id, current_user)
     return objetivo
+
+
+def verificar_acesso_prova(prova, current_user: User):
+    """Guard cross-tenant para Prova (Tarefa 1.2). SUPER_ADMIN tudo; senao exige
+    ser o criador (criado_por_id). Ownership implica mesma escola -> bloqueia cross-tenant."""
+    from app.models.user import UserRole
+    if current_user.role == UserRole.SUPER_ADMIN:
+        return prova
+    if prova.criado_por_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+            detail="Voce nao tem permissao para acessar esta prova")
+    return prova
 
 
 # ============================================

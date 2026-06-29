@@ -580,7 +580,8 @@ async def upload_e_analisar_relatorio(
         arquivo_base64=None,
         dados_extraidos={"json_path": safe_json_filename},
         condicoes=None,
-        created_by=current_user.id
+        created_by=current_user.id,
+        escola_id=student.escola_id
     )
     
     if hasattr(Relatorio, 'arquivo_path'):
@@ -727,7 +728,8 @@ async def upload_e_analisar_rapido(
         arquivo_base64=None,
         dados_extraidos={"json_path": safe_json_filename},
         condicoes=None,
-        created_by=current_user.id
+        created_by=current_user.id,
+        escola_id=student.escola_id
     )
     if hasattr(Relatorio, 'arquivo_path'):
         setattr(novo_relatorio, 'arquivo_path', safe_pdf_filename)

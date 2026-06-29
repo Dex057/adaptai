@@ -15,6 +15,7 @@ from app.schemas.analise_qualitativa import (
 )
 from app.services.analise_qualitativa_service import analise_service
 from app.api.dependencies import get_current_active_user
+from app.core.tenant import tenant_scoped_query
 from app.models.user import User
 
 
@@ -38,7 +39,7 @@ async def gerar_analise_qualitativa(
     """
     
     # Buscar prova do aluno
-    prova_aluno = db.query(ProvaAluno).filter(
+    prova_aluno = tenant_scoped_query(db, ProvaAluno, current_user).filter(
         ProvaAluno.id == prova_aluno_id
     ).first()
     
@@ -56,7 +57,7 @@ async def gerar_analise_qualitativa(
         )
     
     # Verificar se já existe análise
-    analise_existente = db.query(AnaliseQualitativa).filter(
+    analise_existente = tenant_scoped_query(db, AnaliseQualitativa, current_user).filter(
         AnaliseQualitativa.prova_aluno_id == prova_aluno_id
     ).first()
     
@@ -110,7 +111,7 @@ async def obter_analise_qualitativa(
     """
     
     # Buscar análise
-    analise = db.query(AnaliseQualitativa).filter(
+    analise = tenant_scoped_query(db, AnaliseQualitativa, current_user).filter(
         AnaliseQualitativa.prova_aluno_id == prova_aluno_id
     ).first()
     
@@ -121,7 +122,7 @@ async def obter_analise_qualitativa(
         )
     
     # Buscar prova do aluno
-    prova_aluno = db.query(ProvaAluno).filter(
+    prova_aluno = tenant_scoped_query(db, ProvaAluno, current_user).filter(
         ProvaAluno.id == prova_aluno_id
     ).first()
     
@@ -159,7 +160,7 @@ async def deletar_analise(
     🗑️ Deleta análise qualitativa
     """
     
-    analise = db.query(AnaliseQualitativa).filter(
+    analise = tenant_scoped_query(db, AnaliseQualitativa, current_user).filter(
         AnaliseQualitativa.prova_aluno_id == prova_aluno_id
     ).first()
     

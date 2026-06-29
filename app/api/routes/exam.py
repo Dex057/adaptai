@@ -10,6 +10,7 @@ from app.models.student import Student
 from app.models.application import Application, ApplicationStatus
 from app.services.ai_service import AIService
 from app.api.dependencies import get_current_active_user
+from app.core.tenant import tenant_scoped_query
 from pydantic import BaseModel, Field
 
 router = APIRouter(prefix="/exam", tags=["Exam Management"])
@@ -152,7 +153,7 @@ async def assign_exam_to_student(
     """
     
     # Verificar se prova existe
-    question_set = db.query(QuestionSet).filter(QuestionSet.id == request.exam_id).first()
+    question_set = tenant_scoped_query(db, QuestionSet, current_user).filter(QuestionSet.id == request.exam_id).first()
     if not question_set:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -160,7 +161,7 @@ async def assign_exam_to_student(
         )
     
     # Verificar se aluno existe
-    student = db.query(Student).filter(Student.id == request.student_id).first()
+    student = tenant_scoped_query(db, Student, current_user).filter(Student.id == request.student_id).first()
     if not student:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -213,7 +214,7 @@ async def list_exams(
     Lista todas as provas criadas (para o administrador escolher qual associar)
     """
     
-    question_sets = db.query(QuestionSet).order_by(QuestionSet.created_at.desc()).all()
+    question_sets = tenant_scoped_query(db, QuestionSet, current_user).order_by(QuestionSet.created_at.desc()).all()
     
     return [
         ExamResponse(
@@ -240,7 +241,7 @@ async def get_student_available_exams(
     """
     
     # Verificar se aluno existe
-    student = db.query(Student).filter(Student.id == student_id).first()
+    student = tenant_scoped_query(db, Student, current_user).filter(Student.id == student_id).first()
     if not student:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

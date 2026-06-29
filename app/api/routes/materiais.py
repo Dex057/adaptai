@@ -228,7 +228,8 @@ async def criar_material(
         serie_nivel=material_data.serie_nivel,
         tags=material_data.tags or [],
         status=StatusMaterial.GERANDO,
-        criado_por_id=current_user.id
+        criado_por_id=current_user.id,
+        escola_id=current_user.escola_id
     )
     
     db.add(novo_material)

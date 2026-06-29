@@ -11,7 +11,9 @@ from app.core.anthropic_client import get_anthropic_client, get_default_model
 from app.core.rate_limit import check_rate_limit
 from app.core.logging_config import get_logger
 from app.api.dependencies import get_current_active_user
+from app.core.tenant import tenant_scoped_query, enforce_limite_peis
 from app.models.user import User
+from app.models.pei import PEI
 from app.models.relatorio import Relatorio
 from app.models.student import Student
 
@@ -269,11 +271,11 @@ async def gerar_pei_de_relatorios(
         error_message="Limite de geracoes de PEI atingido. Aguarde 1 hora."
     )
 
-    # NOTA: o limite mensal de PEIs (limite_peis_mes) NAO e aplicado aqui de proposito.
-    # O fluxo atual nao grava registros na tabela 'peis': o PEI e salvo como JSON em
-    # Student.diagnosis (via PUT /students/{id}), entao nao ha um sinal mensal confiavel
-    # para contar aqui. O custo de geracao ja e contido pelo rate limit acima (20/hora).
-    # A cota mensal de PEI sera tratada junto com a trilha de pagamento.
+    # Tarefa 4.1 (Caminho A): o PEI gerado agora e PERSISTIDO na tabela 'peis'
+    # (mais abaixo), entao o limite mensal do plano (limite_peis_mes) passa a ser
+    # cobrado DE FATO - e aqui, ANTES da chamada de IA (que e cara). Grandfather:
+    # super_admin e escola sem assinatura ativa/trial nao sao limitados.
+    enforce_limite_peis(db, current_user)
 
     student_id = data.get("student_id")
     relatorio_ids = data.get("relatorio_ids", [])
@@ -288,7 +290,7 @@ async def gerar_pei_de_relatorios(
         )
 
     # Verificar se o aluno existe
-    student = db.query(Student).filter(Student.id == student_id).first()
+    student = tenant_scoped_query(db, Student, current_user).filter(Student.id == student_id).first()
     if not student:
         raise HTTPException(status_code=404, detail="Aluno não encontrado")
 
@@ -430,11 +432,33 @@ Retorne APENAS o JSON, sem explicações adicionais."""
                 "mensagem": "Não foi possível estruturar o PEI automaticamente"
             }
 
+        # Tarefa 4.1 (Caminho A): grava o PEI na tabela 'peis' para o limite
+        # mensal contar de verdade. So persiste se o JSON foi estruturado.
+        pei_id = None
+        if not (isinstance(pei_gerado, dict) and pei_gerado.get("erro_parse")):
+            from datetime import datetime as _dt
+            novo_pei = PEI(
+                student_id=student_id,
+                created_by=current_user.id,
+                escola_id=getattr(current_user, "escola_id", None),
+                ano_letivo=str(_dt.now().year),
+                status="rascunho",
+                diagnosticos=pei_gerado.get("diagnosticos"),
+                pontos_fortes=pei_gerado.get("pontos_fortes"),
+                desafios=pei_gerado.get("dificuldades"),
+                ia_sugestoes_originais=pei_gerado,
+            )
+            db.add(novo_pei)
+            db.commit()
+            db.refresh(novo_pei)
+            pei_id = novo_pei.id
+
         return {
             "success": True,
             "student_name": student.name,
             "relatorios_utilizados": len(relatorios_dados),
-            "pei": pei_gerado
+            "pei": pei_gerado,
+            "pei_id": pei_id
         }
 
     except Exception:

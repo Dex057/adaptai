@@ -57,6 +57,8 @@ class Relatorio(Base):
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
     created_by = Column(Integer, ForeignKey("users.id"))
+    # Tenant denormalizado (Tarefa 1.0): escola fixada na criacao do recurso.
+    escola_id = Column(Integer, ForeignKey("escolas.id"), nullable=True, index=True)
     
     # Relacionamentos
     student = relationship("Student", back_populates="relatorios")

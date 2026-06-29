@@ -74,6 +74,8 @@ class Prova(Base):
     # Quem criou
     criado_por_id = Column(Integer, ForeignKey('users.id'))
     criado_por = relationship("User", back_populates="provas_criadas")
+    # Tenant denormalizado (Tarefa 1.0): escola fixada na criacao do recurso.
+    escola_id = Column(Integer, ForeignKey("escolas.id"), nullable=True, index=True)
     
     # Relacionamentos
     questoes = relationship("QuestaoGerada", back_populates="prova", cascade="all, delete-orphan")

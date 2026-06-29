@@ -350,7 +350,8 @@ class PlanejamentoBNNCService:
             data_fim=data_fim,
             data_proxima_revisao=data_inicio + timedelta(days=90),  # Revisão em 3 meses
             ia_sugestoes_originais=planejamento,
-            status="rascunho"
+            status="rascunho",
+            escola_id=self.db.query(Student.escola_id).filter(Student.id == student_id).scalar()
         )
         
         self.db.add(pei)

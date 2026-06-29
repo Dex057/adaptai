@@ -1,5 +1,5 @@
 # FastAPI e servidor
-fastapi==0.104.1
+fastapi==0.138.2
 uvicorn[standard]==0.24.0
 
 # Banco de dados
@@ -9,28 +9,25 @@ pymysql==1.1.0
 cryptography==41.0.7
 
 # Validacao e configuracao
-pydantic==2.5.0
+pydantic==2.13.4
 pydantic-settings==2.1.0
 email-validator==2.1.1
 
-# Autenticacao
+# Autenticacao (hash com bcrypt direto em core/security.py;
+# passlib removido na Tarefa 2.2 - nao havia import real em app/).
 python-jose[cryptography]==3.3.0
-passlib[bcrypt]==1.7.4
 bcrypt==4.1.2
 
 # Upload de arquivos
 python-multipart==0.0.6
 
-# IA - Anthropic Claude (versao compativel)
+# IA - Anthropic Claude
 anthropic>=0.39.0
-# FIX: httpx >= 0.28 removeu o kwarg 'app' do Client.__init__, quebrando
-# o TestClient do starlette 0.27.x (usado pelo fastapi 0.104). Fixar limite
-# superior ate fastapi/starlette serem atualizados.
-httpx>=0.27.0,<0.28
-# FIX: httpx 0.27.x nao pina upper bound de anyio, e o pip puxa anyio 4.x
-# como transitiva - mas fastapi 0.104.1 exige anyio<4.0.0. Pinar explicito
-# aqui para o resolver nao escolher errado.
-anyio>=3.7.1,<4.0.0
+
+# HTTP client (usado pelo TestClient do Starlette).
+# Tarefa 2.1: pins-remendo httpx<0.28 e anyio<4 REMOVIDOS - com fastapi 0.138 /
+# starlette 1.3 o TestClient ja roda em httpx 0.28+ e anyio 4 (transitivo).
+httpx>=0.28
 
 # PDF - Extração de texto
 PyMuPDF==1.24.0

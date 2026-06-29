@@ -10,6 +10,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from app.database import get_db
 from app.api.dependencies import get_current_active_user
+from app.core.tenant import tenant_scoped_query
 from app.models.user import User
 from app.models.student import Student
 from app.models.diario_aprendizagem import (
@@ -513,7 +514,7 @@ async def marcar_conteudo_gerado(
     Usado após gerar material para evitar duplicação.
     """
     
-    conteudo = db.query(ConteudoExtraido).filter(
+    conteudo = tenant_scoped_query(db, ConteudoExtraido, current_user).filter(
         ConteudoExtraido.id == conteudo_id
     ).first()
     

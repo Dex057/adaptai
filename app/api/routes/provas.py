@@ -39,23 +39,15 @@ from app.schemas.prova import (
 )
 from app.services.prova_ai_service import prova_ai_service, ProvaIAError
 from app.api.dependencies import get_current_user, oauth2_scheme, get_user_from_token, verificar_acesso_aluno
-from app.core.tenant import enforce_limite_provas
+from app.core.tenant import enforce_limite_provas, tenant_scoped_query
 
 router = APIRouter(prefix="/provas")
 
 
 def _verificar_acesso_prova(prova, current_user) -> None:
-    """SEGURANCA (anti-IDOR): garante que o usuario e dono da prova (criada por
-    ele) ou super_admin. Levanta 403 caso contrario. Espelha o padrao ja usado
-    em professor_analytics.py e prova_adaptativa.py."""
-    from app.models.user import UserRole
-    if current_user.role == UserRole.SUPER_ADMIN:
-        return
-    if prova.criado_por_id != current_user.id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Voce nao tem permissao para acessar esta prova"
-        )
+    """Delega para o guard centralizado dependencies.verificar_acesso_prova (Tarefa 1.2)."""
+    from app.api.dependencies import verificar_acesso_prova
+    verificar_acesso_prova(prova, current_user)
 
 
 # ============= ENDPOINTS ADMIN =============
@@ -144,7 +136,8 @@ Por favor, adapte as questões considerando:
                 pontuacao_total=request.pontuacao_total,
                 nota_minima_aprovacao=request.nota_minima_aprovacao,
                 status=StatusProva.ATIVA,
-                criado_por_id=user_id
+                criado_por_id=user_id,
+                escola_id=current_user.escola_id
             )
             
             db.add(nova_prova)
@@ -175,10 +168,10 @@ Por favor, adapte as questões considerando:
                 
                 for aluno_id in request.aluno_ids:
                     # Verifica se aluno existe
-                    aluno = db.query(Student).filter(Student.id == aluno_id).first()
+                    aluno = tenant_scoped_query(db, Student, current_user).filter(Student.id == aluno_id).first()
                     if aluno:
                         # Verifica se já não está associado
-                        ja_associado = db.query(ProvaAluno).filter(
+                        ja_associado = tenant_scoped_query(db, ProvaAluno, current_user).filter(
                             ProvaAluno.prova_id == nova_prova.id,
                             ProvaAluno.aluno_id == aluno_id
                         ).first()
@@ -196,7 +189,7 @@ Por favor, adapte as questões considerando:
             db.commit()
             
             # Busca a prova com questoes carregadas (eager loading)
-            prova_completa = db.query(Prova).options(
+            prova_completa = tenant_scoped_query(db, Prova, current_user).options(
                 joinedload(Prova.questoes)
             ).filter(Prova.id == nova_prova.id).first()
             

@@ -28,6 +28,7 @@ from app.schemas.redacao import (
 )
 from app.services.redacao_ai_service import redacao_ai_service
 from app.api.dependencies import get_current_user, oauth2_scheme, get_user_from_token, verificar_acesso_aluno
+from app.core.tenant import tenant_scoped_query
 from app.core.pagination import PaginationParams, build_page
 from app.core.rate_limit import check_rate_limit
 
@@ -193,7 +194,7 @@ def listar_temas(
         pagination.page = real_page
         pagination.size = real_limit
     
-    query = db.query(TemaRedacao).filter(TemaRedacao.ativo == True).order_by(TemaRedacao.criado_em.desc())
+    query = tenant_scoped_query(db, TemaRedacao, current_user).filter(TemaRedacao.ativo == True).order_by(TemaRedacao.criado_em.desc())
     
     total = query.count()
     temas = query.offset(pagination.offset).limit(pagination.limit).all()
@@ -245,7 +246,7 @@ def obter_tema(
     """
     📄 Obter detalhes de um tema
     """
-    tema = db.query(TemaRedacao).filter(TemaRedacao.id == tema_id).first()
+    tema = tenant_scoped_query(db, TemaRedacao, current_user).filter(TemaRedacao.id == tema_id).first()
     
     if not tema:
         raise HTTPException(status_code=404, detail="Tema não encontrado")

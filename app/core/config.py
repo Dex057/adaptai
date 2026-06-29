@@ -130,17 +130,9 @@ class Settings(BaseSettings):
     ASAAS_ENV: str = "sandbox"  # "sandbox" ou "production"
     ASAAS_WEBHOOK_TOKEN: str = ""  # validado no header 'asaas-access-token' do webhook
 
-    # CORS - Origens permitidas (separadas por vírgula)
-    BACKEND_CORS_ORIGINS: str = "http://localhost:3000,http://localhost:5173,https://*.vercel.app"
-
-    @property
-    def cors_origins(self) -> List[str]:
-        """Converte a string de CORS em lista"""
-        origins = [origin.strip() for origin in self.BACKEND_CORS_ORIGINS.split(",")]
-        # Em produção, permite qualquer subdomínio vercel.app
-        if self.ENVIRONMENT == "production":
-            origins.append("https://*.vercel.app")
-        return origins
+    # CORS: a fonte unica de verdade e o main.py (lista fechada de origens +
+    # FRONTEND_URL via env). Config de origens morta removida na Tarefa 3.1:
+    # nao era usada por ninguem e contradizia a lista fechada do main.py.
 
     @property
     def asaas_base_url(self) -> str:

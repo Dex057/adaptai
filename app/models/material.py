@@ -57,6 +57,8 @@ class Material(Base):
     # Relacionamentos
     criado_por_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     criado_por = relationship("User", back_populates="materiais_criados")
+    # Tenant denormalizado (Tarefa 1.0): escola fixada na criacao do recurso.
+    escola_id = Column(Integer, ForeignKey("escolas.id"), nullable=True, index=True)
     materiais_alunos = relationship("MaterialAluno", back_populates="material", cascade="all, delete-orphan")
 
 

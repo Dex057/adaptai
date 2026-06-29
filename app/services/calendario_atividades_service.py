@@ -486,7 +486,8 @@ Retorne APENAS o JSON."""
                 serie_nivel=student.grade_level,
                 metadados={"conteudo": conteudo, "tipo_geracao": "ia_pei"},
                 status=StatusMaterial.DISPONIVEL,
-                criado_por_id=user_id
+                criado_por_id=user_id,
+                escola_id=student.escola_id
             )
             self.db.add(material)
             self.db.flush()
@@ -596,7 +597,8 @@ Retorne APENAS o JSON."""
                 serie_nivel=student.grade_level,
                 quantidade_questoes=len(prova_data.get("questoes", [])),
                 status=StatusProva.ATIVA,
-                criado_por_id=user_id
+                criado_por_id=user_id,
+                escola_id=student.escola_id
             )
             self.db.add(prova)
             self.db.flush()

@@ -342,3 +342,129 @@ def enforce_limite_relatorios(db: Session, user: User) -> None:
         db, user, model=Relatorio, creator_col=Relatorio.created_by,
         date_col=Relatorio.created_at, limite_attr="limite_relatorios_mes", rotulo="relatorios",
     )
+
+
+# ============================================================
+# QUERY FAIL-CLOSED POR TENANT (Tarefa 1.1) - integrado com a
+# denormalizacao de escola_id (Tarefa 1.0): Prova/Material/
+# Relatorio/PEI agora tem coluna escola_id propria -> direct().
+# ============================================================
+
+class TenantContextoSemEscola(HTTPException):
+    def __init__(self, model_name: str):
+        super().__init__(status_code=status.HTTP_403_FORBIDDEN,
+            detail=("Acesso negado: contexto sem escola para consulta tenant-scoped "
+                    f"({model_name}). Usuario precisa estar vinculado a uma escola."))
+
+
+class TenantModelNaoRegistrado(HTTPException):
+    def __init__(self, model_name: str):
+        super().__init__(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=(f"Model '{model_name}' nao tem estrategia de tenant registrada. "
+                    "Adicione-o ao registry em core/tenant.py (fail-closed)."))
+
+
+_TENANT_SCOPE_REGISTRY = None
+
+
+def _build_tenant_scope_registry() -> dict:
+    from app.models.student import Student
+    from app.models.escola import Escola, ConfiguracaoEscola
+    from app.models.assinatura import Assinatura
+    from app.models.pei import PEI, PEIObjetivo, PEIProgressLog, PEIAjuste
+    from app.models.prova import Prova, ProvaAluno, QuestaoGerada, RespostaAluno
+    from app.models.material import Material, MaterialAluno
+    from app.models.material_adaptado_gerado import MaterialAdaptadoGerado
+    from app.models.question import QuestionSet, Question
+    from app.models.relatorio import Relatorio
+    from app.models.atividade_pei import AtividadePEI
+    from app.models.diario_aprendizagem import (DiarioAprendizagem, ConteudoExtraido, ResumoSemanalAprendizagem)
+    from app.models.performance import PerformanceAnalysis
+    from app.models.application import Application, StudentAnswer
+    from app.models.redacao import TemaRedacao, RedacaoAluno
+    from app.models.agenda import AgendaProfessor
+    from app.models.registro_diario import RegistroDiario
+    from app.models.analise_qualitativa import AnaliseQualitativa
+    from app.models.planejamento_job import PlanejamentoJob
+
+    def direct(model):
+        return lambda q, eid: q.filter(model.escola_id == eid)
+    def escola_root():
+        return lambda q, eid: q.filter(Escola.id == eid)
+    def via_student(fk):
+        return lambda q, eid: q.join(Student, fk == Student.id).filter(Student.escola_id == eid)
+    def via_user(fk):
+        return lambda q, eid: q.join(User, fk == User.id).filter(User.escola_id == eid)
+    def via_pei(fk):  # PEI tem escola_id propria (Tarefa 1.0)
+        return lambda q, eid: q.join(PEI, fk == PEI.id).filter(PEI.escola_id == eid)
+    def via_pei_objetivo(fk):
+        return lambda q, eid: (q.join(PEIObjetivo, fk == PEIObjetivo.id)
+                                .join(PEI, PEIObjetivo.pei_id == PEI.id).filter(PEI.escola_id == eid))
+    def via_prova_aluno(fk):
+        return lambda q, eid: (q.join(ProvaAluno, fk == ProvaAluno.id)
+                                .join(Student, ProvaAluno.aluno_id == Student.id).filter(Student.escola_id == eid))
+    def via_prova(fk):  # Prova tem escola_id propria (Tarefa 1.0)
+        return lambda q, eid: q.join(Prova, fk == Prova.id).filter(Prova.escola_id == eid)
+    def via_question_set(fk):
+        return lambda q, eid: (q.join(QuestionSet, fk == QuestionSet.id)
+                                .join(User, QuestionSet.user_id == User.id).filter(User.escola_id == eid))
+
+    return {
+        # DIRECT (coluna escola_id propria) - inclui os 4 denormalizados na Tarefa 1.0
+        Student: direct(Student), Assinatura: direct(Assinatura),
+        ConfiguracaoEscola: direct(ConfiguracaoEscola), Escola: escola_root(),
+        Prova: direct(Prova), Material: direct(Material),
+        Relatorio: direct(Relatorio), PEI: direct(PEI),
+        # VIA STUDENT
+        AtividadePEI: via_student(AtividadePEI.student_id),
+        DiarioAprendizagem: via_student(DiarioAprendizagem.student_id),
+        ConteudoExtraido: via_student(ConteudoExtraido.student_id),
+        ResumoSemanalAprendizagem: via_student(ResumoSemanalAprendizagem.student_id),
+        PerformanceAnalysis: via_student(PerformanceAnalysis.student_id),
+        Application: via_student(Application.student_id),
+        StudentAnswer: via_student(StudentAnswer.student_id),
+        RedacaoAluno: via_student(RedacaoAluno.aluno_id),
+        ProvaAluno: via_student(ProvaAluno.aluno_id),
+        MaterialAluno: via_student(MaterialAluno.aluno_id),
+        MaterialAdaptadoGerado: via_student(MaterialAdaptadoGerado.student_id),
+        PlanejamentoJob: via_student(PlanejamentoJob.student_id),
+        # VIA USER (sem denorm)
+        QuestionSet: via_user(QuestionSet.user_id),
+        AgendaProfessor: via_user(AgendaProfessor.professor_id),
+        RegistroDiario: via_user(RegistroDiario.professor_id),
+        TemaRedacao: via_user(TemaRedacao.criado_por_id),
+        # NETOS
+        PEIObjetivo: via_pei(PEIObjetivo.pei_id),
+        PEIProgressLog: via_pei_objetivo(PEIProgressLog.goal_id),
+        PEIAjuste: via_pei(PEIAjuste.pei_id),
+        AnaliseQualitativa: via_prova_aluno(AnaliseQualitativa.prova_aluno_id),
+        RespostaAluno: via_prova_aluno(RespostaAluno.prova_aluno_id),
+        QuestaoGerada: via_prova(QuestaoGerada.prova_id),
+        Question: via_question_set(Question.question_set_id),
+    }
+
+
+def _tenant_scope_for(model):
+    global _TENANT_SCOPE_REGISTRY
+    if _TENANT_SCOPE_REGISTRY is None:
+        _TENANT_SCOPE_REGISTRY = _build_tenant_scope_registry()
+    return _TENANT_SCOPE_REGISTRY.get(model)
+
+
+def tenant_scoped_query(db: Session, model, user: User):
+    """Fail-closed por escola. ViewAs (1.3): super_admin com view_as_escola_id
+    e escopado a escola alvo; sem isso, super_admin tem bypass total."""
+    if getattr(user, "role", None) == UserRole.SUPER_ADMIN:
+        view_as = getattr(user, "view_as_escola_id", None)
+        if view_as is None:
+            return db.query(model)
+        estrategia = _tenant_scope_for(model)
+        if estrategia is None:
+            raise TenantModelNaoRegistrado(getattr(model, "__name__", str(model)))
+        return estrategia(db.query(model), view_as)
+    if getattr(user, "escola_id", None) is None:
+        raise TenantContextoSemEscola(getattr(model, "__name__", str(model)))
+    estrategia = _tenant_scope_for(model)
+    if estrategia is None:
+        raise TenantModelNaoRegistrado(getattr(model, "__name__", str(model)))
+    return estrategia(db.query(model), user.escola_id)

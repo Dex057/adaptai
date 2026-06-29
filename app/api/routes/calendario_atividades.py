@@ -15,6 +15,7 @@ from app.models.student import Student
 from app.models.pei import PEI
 from app.models.atividade_pei import AtividadePEI, TipoAtividade, StatusAtividade
 from app.services.calendario_atividades_service import CalendarioAtividadesService
+from app.core.tenant import tenant_scoped_query
 
 
 router = APIRouter(prefix="/calendario", tags=["Calendário de Atividades"])
@@ -70,12 +71,12 @@ async def gerar_calendario_pei(
     """
     
     # Verificar se o PEI existe
-    pei = db.query(PEI).filter(PEI.id == request.pei_id).first()
+    pei = tenant_scoped_query(db, PEI, current_user).filter(PEI.id == request.pei_id).first()
     if not pei:
         raise HTTPException(status_code=404, detail="PEI não encontrado")
     
     # Verificar se já existe calendário
-    atividades_existentes = db.query(AtividadePEI).filter(
+    atividades_existentes = tenant_scoped_query(db, AtividadePEI, current_user).filter(
         AtividadePEI.pei_id == request.pei_id
     ).count()
     
@@ -117,6 +118,9 @@ async def regenerar_calendario_pei(
     """
     
     # Excluir atividades existentes
+    pei = tenant_scoped_query(db, PEI, current_user).filter(PEI.id == pei_id).first()
+    if not pei:
+        raise HTTPException(status_code=404, detail="PEI nao encontrado")
     db.query(AtividadePEI).filter(AtividadePEI.pei_id == pei_id).delete()
     db.commit()
     
@@ -158,7 +162,7 @@ async def listar_atividades_aluno(
     Lista todas as atividades de um aluno com filtros opcionais.
     """
     
-    query = db.query(AtividadePEI).filter(AtividadePEI.student_id == student_id)
+    query = tenant_scoped_query(db, AtividadePEI, current_user).filter(AtividadePEI.student_id == student_id)
     
     if data_inicio:
         query = query.filter(AtividadePEI.data_programada >= data_inicio)
@@ -225,7 +229,7 @@ async def listar_atividades_hoje(
     
     hoje = date.today()
     
-    atividades = db.query(AtividadePEI).filter(
+    atividades = tenant_scoped_query(db, AtividadePEI, current_user).filter(
         AtividadePEI.student_id == student_id,
         AtividadePEI.data_programada == hoje
     ).order_by(AtividadePEI.ordem_sequencial).all()
@@ -263,7 +267,7 @@ async def listar_proximas_atividades(
     
     hoje = date.today()
     
-    atividades = db.query(AtividadePEI).filter(
+    atividades = tenant_scoped_query(db, AtividadePEI, current_user).filter(
         AtividadePEI.student_id == student_id,
         AtividadePEI.data_programada >= hoje,
         AtividadePEI.status.in_([StatusAtividade.PENDENTE, StatusAtividade.EM_ANDAMENTO])
@@ -299,7 +303,7 @@ async def listar_atividades_atrasadas(
     
     hoje = date.today()
     
-    atividades = db.query(AtividadePEI).filter(
+    atividades = tenant_scoped_query(db, AtividadePEI, current_user).filter(
         AtividadePEI.student_id == student_id,
         AtividadePEI.data_programada < hoje,
         AtividadePEI.status.in_([StatusAtividade.PENDENTE, StatusAtividade.EM_ANDAMENTO])
@@ -337,7 +341,7 @@ async def listar_atividades_pei(
     Lista todas as atividades de um PEI.
     """
     
-    atividades = db.query(AtividadePEI).filter(
+    atividades = tenant_scoped_query(db, AtividadePEI, current_user).filter(
         AtividadePEI.pei_id == pei_id
     ).order_by(AtividadePEI.data_programada, AtividadePEI.ordem_sequencial).all()
     
@@ -381,7 +385,7 @@ async def obter_atividade(
     Obtém detalhes de uma atividade específica.
     """
     
-    atividade = db.query(AtividadePEI).filter(AtividadePEI.id == atividade_id).first()
+    atividade = tenant_scoped_query(db, AtividadePEI, current_user).filter(AtividadePEI.id == atividade_id).first()
     
     if not atividade:
         raise HTTPException(status_code=404, detail="Atividade não encontrada")
@@ -422,7 +426,7 @@ async def atualizar_status_atividade(
     Atualiza o status de uma atividade.
     """
     
-    atividade = db.query(AtividadePEI).filter(AtividadePEI.id == atividade_id).first()
+    atividade = tenant_scoped_query(db, AtividadePEI, current_user).filter(AtividadePEI.id == atividade_id).first()
     
     if not atividade:
         raise HTTPException(status_code=404, detail="Atividade não encontrada")
@@ -465,7 +469,7 @@ async def reagendar_atividade(
     Reagenda uma atividade para outra data.
     """
     
-    atividade = db.query(AtividadePEI).filter(AtividadePEI.id == atividade_id).first()
+    atividade = tenant_scoped_query(db, AtividadePEI, current_user).filter(AtividadePEI.id == atividade_id).first()
     
     if not atividade:
         raise HTTPException(status_code=404, detail="Atividade não encontrada")
@@ -497,7 +501,7 @@ async def excluir_atividade(
     Exclui uma atividade do calendário.
     """
     
-    atividade = db.query(AtividadePEI).filter(AtividadePEI.id == atividade_id).first()
+    atividade = tenant_scoped_query(db, AtividadePEI, current_user).filter(AtividadePEI.id == atividade_id).first()
     
     if not atividade:
         raise HTTPException(status_code=404, detail="Atividade não encontrada")
@@ -531,7 +535,7 @@ async def calendario_mensal_aluno(
     else:
         ultimo_dia = date(ano, mes + 1, 1) - timedelta(days=1)
     
-    atividades = db.query(AtividadePEI).filter(
+    atividades = tenant_scoped_query(db, AtividadePEI, current_user).filter(
         AtividadePEI.student_id == student_id,
         AtividadePEI.data_programada >= primeiro_dia,
         AtividadePEI.data_programada <= ultimo_dia

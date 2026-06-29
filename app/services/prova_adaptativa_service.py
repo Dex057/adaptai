@@ -9,6 +9,7 @@ from app.core.config import settings
 from app.core.anthropic_client import get_fast_model
 from app.models.prova import Prova, QuestaoGerada, ProvaAluno, TipoQuestao, DificuldadeQuestao, StatusProva
 from app.models.analise_qualitativa import AnaliseQualitativa
+from app.models.user import User
 import json
 
 
@@ -226,7 +227,8 @@ Gere a prova de reforço agora:
             pontuacao_total=float(len(questoes) * 0.5),  # 0.5 pontos por questão
             nota_minima_aprovacao=prova_original.nota_minima_aprovacao,
             status=StatusProva.ATIVA,
-            criado_por_id=criado_por_id
+            criado_por_id=criado_por_id,
+            escola_id=db.query(User.escola_id).filter(User.id == criado_por_id).scalar()
         )
         
         db.add(nova_prova)

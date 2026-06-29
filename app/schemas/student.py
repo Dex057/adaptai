@@ -36,6 +36,8 @@ class StudentResponse(StudentBase):
     diagnosis: Optional[Dict] = None
     profile_data: Optional[Dict] = None
     notes: Optional[str] = None
+    # Derivado do diagnosis (read-only): publico-alvo da Educacao Especial (AEE)
+    publico_aee: bool = False
     is_active: bool = True
     foto_path: Optional[str] = None
     created_by_user_id: int
@@ -53,6 +55,7 @@ class StudentListResponse(BaseModel):
     turma: Optional[str] = None
     matricula: Optional[str] = None
     diagnosis: Optional[Dict] = None
+    publico_aee: bool = False
     is_active: bool = True
     foto_path: Optional[str] = None
     created_at: datetime

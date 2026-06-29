@@ -1,7 +1,26 @@
+import json
+
 from sqlalchemy import Column, Integer, String, Date, JSON, ForeignKey, DateTime, Text, Boolean
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.database import Base
+
+
+# Condicoes que caracterizam publico-alvo do AEE (Atendimento Educacional
+# Especializado), conforme a Politica Nacional de Educacao Especial / Decreto
+# 7.611 e Resolucao CNE/CEB 4/2009: deficiencias, TEA/TGD e altas habilidades.
+# Transtornos funcionais especificos (TDAH, dislexia, discalculia, disgrafia,
+# TOD) NAO integram o publico-alvo legal do AEE e ficam de fora da contagem.
+# Set centralizado para ajustar a regra num lugar so (sem cacar pelo codigo).
+CONDICOES_PUBLICO_AEE = frozenset({
+    "tea",
+    "sindrome_down",
+    "deficiencia_intelectual",
+    "deficiencia_visual",
+    "deficiencia_auditiva",
+    "deficiencia_fisica",
+    "altas_habilidades",
+})
 
 
 class Student(Base):
@@ -59,3 +78,25 @@ class Student(Base):
     relatorios = relationship("Relatorio", back_populates="student", cascade="all, delete-orphan")
     diarios_aprendizagem = relationship("DiarioAprendizagem", back_populates="student", cascade="all, delete-orphan")
     redacoes = relationship("RedacaoAluno", back_populates="aluno", cascade="all, delete-orphan")
+
+    @property
+    def publico_aee(self) -> bool:
+        """
+        Marcador (derivado, sem coluna) de publico-alvo da Educacao Especial.
+
+        Inferido do JSON `diagnosis`: True se houver ao menos uma condicao do
+        publico-alvo do AEE (ver CONDICOES_PUBLICO_AEE) com valor verdadeiro.
+        Read-only. Para filtro/indice em SQL nos agregados SEDUC, promover a
+        coluna via migration Alembic quando a 1.0/Railway estiverem estaveis.
+        """
+        diag = self.diagnosis
+        if not diag:
+            return False
+        if isinstance(diag, str):
+            try:
+                diag = json.loads(diag)
+            except (ValueError, TypeError):
+                return False
+        if not isinstance(diag, dict):
+            return False
+        return any(bool(diag.get(cond)) for cond in CONDICOES_PUBLICO_AEE)

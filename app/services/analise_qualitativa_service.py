@@ -6,6 +6,7 @@ import anthropic
 from typing import Dict, List
 from app.core.config import settings
 from app.core.anthropic_client import get_fast_model
+from app.core.ai_usage import registrar_uso_ia
 from app.models.prova import ProvaAluno, RespostaAluno, QuestaoGerada, StatusProvaAluno
 
 
@@ -225,7 +226,13 @@ IMPORTANTE:
                     {"role": "user", "content": prompt}
                 ]
             )
-            
+
+            registrar_uso_ia(
+                feature="analise_qualitativa",
+                model=self.model,
+                usage=message.usage,
+            )
+
             return message.content[0].text
             
         except Exception as e:

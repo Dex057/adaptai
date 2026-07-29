@@ -110,6 +110,9 @@ from app.models.background_task import (
 # Cache de respostas de IA (E3 - economia de creditos Anthropic)
 from app.models.ai_cache import AICache
 
+# Log de consumo de tokens da IA (contador por feature/aluno/usuario)
+from app.models.ai_usage_log import AIUsageLog
+
 
 __all__ = [
     # Multi-tenant
@@ -210,4 +213,7 @@ __all__ = [
     
     # Cache de IA
     "AICache",
+
+    # Log de consumo de tokens da IA
+    "AIUsageLog",
 ]

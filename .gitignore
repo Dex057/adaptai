@@ -3,8 +3,23 @@ venv/
 env/
 .venv/
 
+
 # Variáveis de ambiente (NUNCA SUBIR!)
 .env
+.env.local
+.env.*.local
+
+# Chaves, certificados e credenciais (NUNCA SUBIR!)
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+id_rsa*
+id_ed25519*
+credentials*.json
+secrets*.json
+
 
 # Python
 __pycache__/

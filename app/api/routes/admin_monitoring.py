@@ -112,6 +112,9 @@ def limpar_background_tasks_antigas(current_user: User = Depends(require_admin))
 @router.get("/ai-usage/stats")
 def obter_stats_uso_ia(
     dias: int = 30,
+    feature: str = None,
+    user_id: int = None,
+    student_id: int = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
@@ -119,12 +122,27 @@ def obter_stats_uso_ia(
     Retorna consumo de tokens/custo da IA (Claude) agregado por feature e por
     modelo, na janela dos ultimos `dias` (default 30).
 
+    Filtros opcionais (combinaveis): `feature` (ex.: "jornada_terapeutica"),
+    `user_id`, `student_id`. Uteis para responder perguntas pontuais, ex.:
+    "quanto a jornada terapeutica custou para o usuario 42 nos ultimos 90 dias"
+    -> ?feature=jornada_terapeutica&user_id=42&dias=90
+
+    Nem toda feature grava user_id/student_id (depende do que cada chamada a
+    registrar_uso_ia informou) - ver docs/API_AI_USAGE_STATS.md.
+
     Fonte: tabela ai_usage_log, gravada por app.core.ai_usage.registrar_uso_ia
     apos cada chamada real a Claude nas features de IA (PEI, jornada
     terapeutica, planejamento, analise qualitativa, prova de reforco).
     """
     desde = datetime.now(timezone.utc) - timedelta(days=dias)
     base = db.query(AIUsageLog).filter(AIUsageLog.created_at >= desde)
+
+    if feature is not None:
+        base = base.filter(AIUsageLog.feature == feature)
+    if user_id is not None:
+        base = base.filter(AIUsageLog.user_id == user_id)
+    if student_id is not None:
+        base = base.filter(AIUsageLog.student_id == student_id)
 
     def agregados(coluna):
         return (
@@ -160,6 +178,7 @@ def obter_stats_uso_ia(
 
     return {
         "periodo_dias": dias,
+        "filtros": {"feature": feature, "user_id": user_id, "student_id": student_id},
         "total": {
             "chamadas": int(total_chamadas or 0),
             "input_tokens": int(total_input or 0),

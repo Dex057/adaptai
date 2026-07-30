@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.anthropic_client import get_default_model
+from app.core.ai_usage import registrar_uso_ia
 from app.core.logging_config import get_logger
 from app.models.student import Student
 from app.models.curriculo import CurriculoNacional, MapeamentoPrerequisitos
@@ -204,7 +205,15 @@ class PlanejamentoBNNCService:
                 max_tokens=16384,  # Aumentado para gerar mais objetivos
                 messages=[{"role": "user", "content": prompt}]
             )
-            
+
+            registrar_uso_ia(
+                feature="planejamento_anual",
+                model=MODELO_IA,
+                usage=message.usage,
+                student_id=student_id,
+                user_id=user_id,
+            )
+
             update_progress(85, "Processando resposta da IA...")
             
             response_text = message.content[0].text.strip()
@@ -304,7 +313,14 @@ class PlanejamentoBNNCService:
                 max_tokens=6000,
                 messages=[{"role": "user", "content": prompt}]
             )
-            
+
+            registrar_uso_ia(
+                feature="planejamento_trimestre",
+                model=MODELO_IA,
+                usage=message.usage,
+                student_id=student_id,
+            )
+
             update_progress(85, "Processando resposta...")
             
             response_text = self._limpar_json(message.content[0].text.strip())

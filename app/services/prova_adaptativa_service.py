@@ -7,6 +7,7 @@ from typing import Dict, List
 from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.anthropic_client import get_fast_model
+from app.core.ai_usage import registrar_uso_ia
 from app.models.prova import Prova, QuestaoGerada, ProvaAluno, TipoQuestao, DificuldadeQuestao, StatusProva
 from app.models.analise_qualitativa import AnaliseQualitativa
 import json
@@ -168,7 +169,13 @@ Gere a prova de reforço agora:
                     {"role": "user", "content": prompt}
                 ]
             )
-            
+
+            registrar_uso_ia(
+                feature="prova_reforco",
+                model=self.model,
+                usage=message.usage,
+            )
+
             return message.content[0].text
             
         except Exception as e:

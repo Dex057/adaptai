@@ -12,6 +12,7 @@ from pathlib import Path
 from app.database import get_db
 from app.core.config import settings
 from app.core.anthropic_client import get_default_model
+from app.core.ai_usage import registrar_uso_ia
 from app.api.dependencies import get_current_active_user
 from app.models.user import User
 from app.models.student import Student
@@ -198,8 +199,9 @@ IMPORTANTE:
     try:
         print(f"🤖 Gerando análise consolidada para {student.name}...")
         
+        modelo_usado = get_default_model()
         message = client.messages.create(
-            model=get_default_model(),
+            model=modelo_usado,
             max_tokens=8000,
             messages=[
                 {
@@ -208,7 +210,16 @@ IMPORTANTE:
                 }
             ],
         )
-        
+
+        registrar_uso_ia(
+            feature="jornada_terapeutica",
+            model=modelo_usado,
+            usage=message.usage,
+            student_id=student_id,
+            user_id=current_user.id,
+            escola_id=getattr(current_user, "escola_id", None),
+        )
+
         response_text = message.content[0].text.strip()
         
         # Limpar markdown

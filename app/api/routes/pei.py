@@ -8,6 +8,7 @@ from pathlib import Path
 from app.database import get_db
 from app.core.config import settings
 from app.core.anthropic_client import get_anthropic_client, get_default_model
+from app.core.ai_usage import registrar_uso_ia
 from app.core.rate_limit import check_rate_limit
 from app.core.logging_config import get_logger
 from app.api.dependencies import get_current_active_user
@@ -197,7 +198,15 @@ Analise o documento com atenção e extraia todas as informações relevantes pa
                 }
             ],
         )
-        
+
+        registrar_uso_ia(
+            feature="pei_analise_laudo",
+            model=MODELO_VISAO,
+            usage=message.usage,
+            user_id=current_user.id,
+            escola_id=getattr(current_user, "escola_id", None),
+        )
+
         # Extrair resposta
         response_text = message.content[0].text
         
@@ -411,6 +420,15 @@ Retorne APENAS o JSON, sem explicações adicionais."""
                     "content": prompt
                 }
             ],
+        )
+
+        registrar_uso_ia(
+            feature="pei_geracao",
+            model=MODELO_PEI_TEXTO,
+            usage=message.usage,
+            student_id=student_id,
+            user_id=current_user.id,
+            escola_id=getattr(current_user, "escola_id", None),
         )
 
         response_text = message.content[0].text.strip()

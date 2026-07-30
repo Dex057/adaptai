@@ -22,6 +22,7 @@ from app.core.anthropic_client import (
     get_anthropic_client as _get_core_anthropic_client,
     get_default_model,
 )
+from app.core.ai_usage import registrar_uso_ia
 from app.models.student import Student
 from app.models.curriculo import CurriculoNacional, MapeamentoPrerequisitos
 from app.models.pei import PEI, PEIObjetivo
@@ -734,14 +735,21 @@ IMPORTANTE:
 - Mantenha o código BNCC original
 - Retorne APENAS o JSON válido, sem texto adicional"""
 
+        modelo_usado = get_default_model()
         message = self.client.messages.create(
-            model=get_default_model(),
+            model=modelo_usado,
             max_tokens=6000,
             messages=[{"role": "user", "content": prompt}]
         )
-        
+
+        registrar_uso_ia(
+            feature="planejamento_anual_completo",
+            model=modelo_usado,
+            usage=message.usage,
+        )
+
         response_text = message.content[0].text.strip()
-        
+
         # Usar validação robusta com fallback
         resultado = self._validar_e_extrair_json(response_text, habilidades)
         

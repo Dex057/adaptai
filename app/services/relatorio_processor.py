@@ -14,6 +14,7 @@ from app.database import SessionLocal
 from app.models.relatorio import Relatorio
 from app.services.websocket_manager import manager
 from app.core.config import settings
+from app.core.ai_usage import registrar_uso_ia
 
 
 class RelatorioProcessorIncremental:
@@ -31,7 +32,9 @@ class RelatorioProcessorIncremental:
         pdf_path: Path,
         json_path: Path,
         content_type: str,
-        user_id: int
+        user_id: int,
+        student_id: int = None,
+        escola_id: int = None
     ):
         """
         Processa relatório em etapas, enviando atualizações via WebSocket
@@ -44,6 +47,13 @@ class RelatorioProcessorIncremental:
         5. Finalização (100%) - Salvar tudo
         """
         
+        # Contexto de atribuicao (student_id/user_id/escola_id) usado por
+        # _call_claude para registrar o consumo de tokens de cada uma das 4
+        # chamadas abaixo.
+        self._student_id = student_id
+        self._user_id = user_id
+        self._escola_id = escola_id
+
         try:
             # Ler arquivo
             with open(pdf_path, "rb") as f:
@@ -249,6 +259,16 @@ APENAS JSON, sem explicações."""
                 }
             ],
         )
+
+        registrar_uso_ia(
+            feature="relatorio_upload",
+            model=self.modelo,
+            usage=message.usage,
+            student_id=getattr(self, "_student_id", None),
+            user_id=getattr(self, "_user_id", None),
+            escola_id=getattr(self, "_escola_id", None),
+        )
+
         return message.content[0].text.strip()
     
     def _parse_json(self, text):

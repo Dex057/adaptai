@@ -230,8 +230,15 @@ async def obter_pei_completo(
                 return []
         return []
 
+    # TC-129: nada no backend calculava/expunha se o prazo de uma meta ja passou.
+    hoje = datetime.now(timezone.utc).date()
+
     for obj in pei.objetivos:
         trimestre = obj.trimestre or 1
+        # Vencida = tem prazo, o prazo ja passou e a meta ainda nao foi atingida.
+        atrasado = bool(
+            obj.prazo and obj.prazo < hoje and obj.status != "atingido"
+        )
         objetivos_por_trimestre[trimestre].append({
             "id": obj.id,
             "area": obj.area,
@@ -246,7 +253,8 @@ async def obter_pei_completo(
             "estrategias": _coerce_list(obj.estrategias),
             "materiais_recursos": _coerce_list(obj.materiais_recursos),
             "criterios_avaliacao": _coerce_list(obj.criterios_avaliacao),
-            "prazo": obj.prazo.isoformat() if obj.prazo else None
+            "prazo": obj.prazo.isoformat() if obj.prazo else None,
+            "prazo_vencido": atrasado
         })
     
     return {

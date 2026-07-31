@@ -80,7 +80,16 @@ async def lifespan(app: FastAPI):
             "production": IS_PRODUCTION_STARTUP,
         },
     )
-    
+
+    # RESEND_API_KEY ausente em producao = e-mails transacionais (recuperacao
+    # de senha, notificacoes) falham silenciosamente (email_service.py retorna
+    # False sem lancar erro, por desenho anti-enumeracao). TC-006/TC-186.
+    if IS_PRODUCTION_STARTUP and not settings.RESEND_API_KEY:
+        logger.warning(
+            "RESEND_API_KEY nao configurada em producao - envio de e-mail "
+            "(recuperacao de senha, notificacoes) esta desabilitado"
+        )
+
     # Cleanup de jobs travados no startup
     try:
         from app.database import SessionLocal

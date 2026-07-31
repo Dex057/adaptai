@@ -220,12 +220,19 @@ IMPORTANTE:
         try:
             response = get_anthropic_client().messages.create(
                 model=get_default_model(),
-                max_tokens=2000,
+                # TC-055: aumentado de 2000 para reduzir risco de truncamento (4 textos
+                # motivadores + proposta completa podem passar de 2000 tokens em pt-BR)
+                max_tokens=3000,
                 messages=[{"role": "user", "content": prompt}]
             )
-            
-            content = response.content[0].text
-            
+
+            content = response.content[0].text.strip()
+            if content.startswith("```"):
+                content = content.split("```", 2)[1]
+                if content.startswith("json"):
+                    content = content[4:]
+                content = content.strip()
+
             # Extrair JSON da resposta
             json_match = re.search(r'\{[\s\S]*\}', content)
             if json_match:
@@ -335,12 +342,23 @@ IMPORTANTE:
         try:
             response = get_anthropic_client().messages.create(
                 model=get_default_model(),
-                max_tokens=3000,
+                # TC-055/TC-144/TC-145: 3000 tokens era insuficiente para o JSON completo
+                # (5 competencias com feedback detalhado + feedback_geral + listas), causando
+                # resposta truncada -> JSON invalido -> "Erro ao corrigir redacao. Tente novamente."
+                max_tokens=6000,
                 messages=[{"role": "user", "content": prompt}]
             )
-            
-            content = response.content[0].text
-            
+
+            content = response.content[0].text.strip()
+            # Remove cercas de markdown (```json ... ```), como feito nos demais servicos de IA
+            # (ai_materiais_service, prova_ai_service etc) - o modelo as vezes ignora o pedido
+            # de "sem markdown" e isso quebrava o parsing aqui.
+            if content.startswith("```"):
+                content = content.split("```", 2)[1]
+                if content.startswith("json"):
+                    content = content[4:]
+                content = content.strip()
+
             # Extrair JSON
             json_match = re.search(r'\{[\s\S]*\}', content)
             if json_match:

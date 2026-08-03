@@ -1,7 +1,11 @@
-from anthropic import Anthropic
+from app.core.anthropic_client import get_anthropic_client
 from app.core.config import settings
 import json
 from typing import List, Dict
+
+# tokenmeter: atribuicao de consumo de IA (ver app/core/features.py)
+import tokenmeter as tm
+from app.core.features import F
 
 class GeradorProvasService:
     """Serviço para gerar provas com IA (Claude)"""
@@ -14,9 +18,10 @@ class GeradorProvasService:
     def client(self):
         """Lazy initialization do cliente Anthropic"""
         if self._client is None:
-            self._client = Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+            self._client = get_anthropic_client()
         return self._client
     
+    @tm.feature(F.PROVA_GERACAO)
     def gerar_prova(
         self,
         subject: str,

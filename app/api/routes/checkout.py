@@ -10,6 +10,7 @@ from app.models.user import User, UserRole
 from app.models.plano import Plano
 from app.models.assinatura import Assinatura, Fatura, StatusFatura, StatusAssinatura as StatusAssinaturaDB
 from app.core.config import settings
+from app.core.anthropic_client import get_fast_model
 from app.core.security import create_access_token, get_password_hash
 from app.core.rate_limit import check_rate_limit
 from app.services.asaas_service import asaas_service, AsaasError
@@ -145,7 +146,9 @@ async def iniciar_checkout(
         # 7. Cria configurações padrão da escola
         configuracao = ConfiguracaoEscola(
             escola_id=escola.id,
-            modelo_ia_preferido="claude-3-haiku-20240307",
+            # Era "claude-3-haiku-20240307", aposentado. Guardar um ID fixo aqui
+            # cria um modelo aposentado latente no banco; usa o modelo rapido atual.
+            modelo_ia_preferido=get_fast_model(),
             quantidade_questoes_padrao=5,
             dificuldade_padrao="medio",
             notificacoes_email=True,

@@ -8,8 +8,13 @@ import re
 import asyncio
 from typing import List, Dict, Any
 from app.core.config import settings
+from app.core.anthropic_client import get_anthropic_client
 from app.core.logging_config import get_logger
 from app.models.prova import TipoQuestao, DificuldadeQuestao
+
+# tokenmeter: atribuicao de consumo de IA (ver app/core/features.py)
+import tokenmeter as tm
+from app.core.features import F
 
 logger = get_logger(__name__)
 
@@ -32,13 +37,13 @@ class ProvaAIService:
     def client(self):
         """Lazy initialization do cliente Anthropic (com timeout e retries de rede)"""
         if self._client is None:
-            self._client = anthropic.Anthropic(
-                api_key=settings.ANTHROPIC_API_KEY,
+            self._client = get_anthropic_client(
                 timeout=self.timeout_seconds,
                 max_retries=2,
             )
         return self._client
     
+    @tm.feature(F.PROVA_GERACAO)
     async def gerar_questoes(
         self,
         conteudo_prompt: str,
@@ -240,6 +245,7 @@ Gere as {quantidade} questões agora:"""
             except json.JSONDecodeError:
                 return None
     
+    @tm.feature(F.DESEMPENHO_ANALISE)
     async def analisar_desempenho(
         self,
         questoes: List[Dict],
@@ -325,6 +331,7 @@ Gere a análise agora:"""
                 "nivel_compreensao": 0
             }
     
+    @tm.feature(F.PROVA_FEEDBACK)
     async def gerar_feedback_personalizado(
         self,
         questoes: List[Dict],

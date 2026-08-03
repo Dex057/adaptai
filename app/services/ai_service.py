@@ -1,7 +1,11 @@
-from anthropic import Anthropic
+from app.core.anthropic_client import get_anthropic_client
 import json
 from typing import List, Dict
 from app.core.config import settings
+
+# tokenmeter: atribuicao de consumo de IA (ver app/core/features.py)
+import tokenmeter as tm
+from app.core.features import F
 
 class AIService:
     def __init__(self):
@@ -12,9 +16,10 @@ class AIService:
     def client(self):
         """Lazy initialization do cliente Anthropic"""
         if self._client is None:
-            self._client = Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+            self._client = get_anthropic_client()
         return self._client
     
+    @tm.feature(F.QUESTAO_GERACAO)
     def generate_questions(
         self,
         content: str,
@@ -170,6 +175,7 @@ IMPORTANTE:
             print(f"Erro ao gerar questões: {e}")
             raise
 
+    @tm.feature(F.DESEMPENHO_ANALISE)
     def analyze_performance(
         self,
         student_name: str,

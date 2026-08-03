@@ -94,6 +94,24 @@ async def get_current_user(
             detail="Usuario desativado. Entre em contato com o administrador."
         )
 
+    # ── tokenmeter: atribuicao de consumo de IA ────────────────────────────────
+    # Este e o gancho unico de atribuicao do projeto: get_current_user e a base de
+    # TODAS as rotas autenticadas (inclusive get_tenant_context). Acrescentando as
+    # tags aqui, qualquer chamada de IA feita durante o request ja sai atribuida a
+    # escola e ao usuario - sem passar nada por parametro ate a camada de servico.
+    #
+    # So IDs. Nunca e-mail, nome ou qualquer atributo de pessoa: a tabela de uso e
+    # telemetria, nao cadastro.
+    try:
+        import tokenmeter as tm
+        tm.tag(
+            tenant_id=user.escola_id,
+            user_id=user.id,
+            user_role=getattr(user.role, "value", user.role),
+        )
+    except Exception:
+        pass  # atribuicao e best-effort; nunca pode derrubar a autenticacao
+
     return user
 
 async def get_current_active_user(

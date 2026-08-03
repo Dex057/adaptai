@@ -19,22 +19,32 @@ from app.models.student import Student
 from app.models.relatorio import Relatorio
 from app.services.ai_cache_service import _hash_prompt, lookup_cache, save_cache
 
+# tokenmeter: atribuicao de consumo de IA (ver app/core/features.py)
+import tokenmeter as tm
+from app.core.features import F
+
 router = APIRouter(prefix="/relatorios", tags=["Relatórios - Análise Consolidada"])
 
 # Diretório para salvar relatórios
 RELATORIOS_DIR = Path(__file__).parent.parent.parent.parent / "storage" / "relatorios"
 
 def get_anthropic_client():
-    """Obtém cliente Anthropic"""
+    """Delega ao singleton central (app/core/anthropic_client.py).
+
+    Mantido como funcao local para nao mexer nos pontos de chamada. Preserva o
+    contrato antigo de devolver None em caso de falha, em vez de propagar.
+    """
     try:
-        from anthropic import Anthropic
-        return Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+        from app.core.anthropic_client import get_anthropic_client as _central
+
+        return _central()
     except Exception as e:
         print(f"[AVISO] Erro ao inicializar Anthropic: {e}")
         return None
 
 
 @router.get("/student/{student_id}/analise-consolidada")
+@tm.feature(F.JORNADA_TERAPEUTICA, entity_type="aluno", entity_from="student_id")
 async def gerar_analise_consolidada(
     student_id: int,
     db: Session = Depends(get_db),

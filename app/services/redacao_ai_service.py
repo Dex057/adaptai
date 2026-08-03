@@ -11,6 +11,10 @@ from datetime import datetime
 from typing import Dict, List, Any, Optional
 from app.core.anthropic_client import get_anthropic_client, get_default_model
 
+# tokenmeter: atribuicao de consumo de IA (ver app/core/features.py)
+import tokenmeter as tm
+from app.core.features import F
+
 # NOTA: antes este modulo instanciava Anthropic() em module-level, o que causava
 # erro na importacao se ANTHROPIC_API_KEY nao estivesse setada ainda.
 # Agora usamos o singleton lazy via get_anthropic_client().
@@ -175,6 +179,7 @@ class RedacaoAIService:
         else:
             return "Insuficiente"
 
+    @tm.feature(F.REDACAO_TEMA)
     async def gerar_tema_atual(
         self,
         area_tematica: Optional[str] = None,
@@ -246,6 +251,7 @@ IMPORTANTE:
             print(f"[ERRO] Erro ao gerar tema: {e}")
             raise
 
+    @tm.feature(F.REDACAO_CORRECAO)
     async def corrigir_redacao_enem(
         self,
         texto_redacao: str,

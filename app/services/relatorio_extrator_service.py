@@ -5,7 +5,7 @@
 Serviço para extrair informações de relatórios diários
 escolares usando Claude AI.
 """
-import anthropic
+from app.core.anthropic_client import get_anthropic_client
 import json
 import base64
 from datetime import datetime
@@ -15,6 +15,10 @@ import fitz  # PyMuPDF
 
 from app.core.config import settings
 
+# tokenmeter: atribuicao de consumo de IA (ver app/core/features.py)
+import tokenmeter as tm
+from app.core.features import F
+
 
 class RelatorioExtratorService:
     """
@@ -23,7 +27,7 @@ class RelatorioExtratorService:
     """
     
     def __init__(self):
-        self.client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+        self.client = get_anthropic_client()
         self.model = settings.CLAUDE_MODEL
     
     def extrair_texto_pdf(self, pdf_path: str) -> str:
@@ -44,6 +48,7 @@ class RelatorioExtratorService:
         with open(pdf_path, "rb") as f:
             return base64.standard_b64encode(f.read()).decode("utf-8")
     
+    @tm.feature(F.RELATORIO_EXTRACAO)
     async def extrair_dados_relatorio(self, pdf_path: str) -> dict:
         """
         Extrai dados estruturados de um relatório diário escolar.
@@ -161,6 +166,7 @@ Responda APENAS com o JSON válido, sem markdown ou texto adicional."""
                 "error": str(e)
             }
     
+    @tm.feature(F.RELATORIO_EXTRACAO)
     async def extrair_com_imagem(self, pdf_path: str) -> dict:
         """
         Versão alternativa que envia o PDF como imagem para o Claude.

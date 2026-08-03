@@ -13,10 +13,15 @@ from typing import Any, Dict, Optional
 
 from app.core.anthropic_client import get_anthropic_client, get_default_model
 
+# tokenmeter: atribuicao de consumo de IA (ver app/core/features.py)
+import tokenmeter as tm
+from app.core.features import F
+
 
 class ComunicacaoAIService:
     """Servico de IA para mensagens a familia."""
 
+    @tm.feature(F.COMUNICACAO_FAMILIA)
     async def gerar_mensagem_familia(
         self,
         aluno_info: Dict[str, Any],

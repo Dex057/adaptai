@@ -17,6 +17,10 @@ from app.models.curriculo import CurriculoNacional, MapeamentoPrerequisitos
 from app.models.pei import PEI, PEIObjetivo
 from app.models.relatorio import Relatorio
 
+# tokenmeter: atribuicao de consumo de IA (ver app/core/features.py)
+import tokenmeter as tm
+from app.core.features import F
+
 
 logger = get_logger(__name__)
 
@@ -30,11 +34,17 @@ MODELO_IA = get_default_model()
 
 
 def get_anthropic_client():
+    """Delega ao singleton central (app/core/anthropic_client.py).
+
+    Mantido como funcao local para nao mexer nos pontos de chamada. Preserva o
+    contrato antigo de devolver None em caso de falha, em vez de propagar.
+    """
     global _client
     if _client is None:
         try:
-            from anthropic import Anthropic
-            _client = Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+            from app.core.anthropic_client import get_anthropic_client as _central
+
+            _client = _central()
         except Exception as e:
             logger.exception(f"[AVISO] Erro ao inicializar Anthropic: {e}")
     return _client
@@ -142,6 +152,7 @@ class PlanejamentoBNNCService:
             "dificuldades": dificuldades_consolidadas
         }
     
+    @tm.feature(F.PLANEJAMENTO_ANUAL, entity_type="aluno", entity_from="student_id")
     async def gerar_planejamento_anual(
         self,
         student_id: int,
@@ -249,6 +260,7 @@ class PlanejamentoBNNCService:
                 "error": str(e)
             }
     
+    @tm.feature(F.PLANEJAMENTO_TRIMESTRE, entity_type="aluno", entity_from="student_id")
     async def gerar_objetivos_pei_por_trimestre(
         self,
         student_id: int,

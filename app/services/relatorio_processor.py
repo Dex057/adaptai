@@ -16,6 +16,10 @@ from app.services.websocket_manager import manager
 from app.core.config import settings
 from app.core.ai_usage import registrar_uso_ia
 
+# tokenmeter: atribuicao de consumo de IA (ver app/core/features.py)
+import tokenmeter as tm
+from app.core.features import F
+
 
 class RelatorioProcessorIncremental:
     """Processa relatorios em etapas, notificando progresso"""
@@ -237,6 +241,7 @@ APENAS JSON, sem explicações."""
         )
         return self._parse_json(response)
     
+    @tm.feature(F.RELATORIO_UPLOAD)
     def _call_claude(self, file_base64, media_type, content_type, prompt):
         """Chama Claude de forma síncrona (para usar com asyncio.to_thread)"""
         message = self.client.messages.create(
@@ -351,7 +356,7 @@ async def processar_relatorio_com_progresso(
     - resumo_clinico (str)
     - recomendacoes (list), adaptacoes_sugeridas (dict)
     """
-    from anthropic import Anthropic
+    from app.core.anthropic_client import get_anthropic_client
     
     async def _notify(progress: int, message: str):
         if progress_callback:
@@ -380,8 +385,9 @@ async def processar_relatorio_com_progresso(
     
     await _notify(10, "Inicializando IA...")
     
-    # Cliente Anthropic
-    client = Anthropic(api_key=api_key)
+    # Cliente Anthropic (singleton instrumentado). O parametro `api_key` e mantido
+    # por compatibilidade de assinatura, mas a chave usada e a de settings.
+    client = get_anthropic_client()
     processor = RelatorioProcessorIncremental(client)
     media_type = processor._get_media_type(content_type)
     

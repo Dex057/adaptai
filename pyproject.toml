@@ -1,0 +1,9 @@
+# Configuracao de ferramentas do repositorio.
+# Criado para o `tokenmeter check` - o projeto usa requirements.txt para
+# dependencias, entao este arquivo NAO declara build nem dependencias.
+
+[tool.tokenmeter.check]
+# Unico modulo autorizado a construir um client Anthropic. Tudo fora daqui e
+# consumo nao medido.
+allowed_client_modules = ["app.core.anthropic_client"]
+providers = ["anthropic"]

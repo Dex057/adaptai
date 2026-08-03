@@ -307,6 +307,40 @@ do TC-027, primeiro da sequência).
   `GET /redacoes/temas` (`redacoes.py:167-236`) já devolve `total`/`temas`/`items` corretamente
   paginados; não encontrei bug ali.
 
+### TC-056, TC-057 - Tom acolhedor do feedback / Histórico de redações (Media/Baixa, Bloqueado) - **MITIGADO (parcial, via TC-055)**
+- **Problema (planilha):** TC-056 - "Feedback foca no que o aluno fez bem e no próximo passo
+  (acolhedor)" não pôde ser avaliado. TC-057 - "Lista as redações corrigidas" não pôde ser
+  avaliado. Em ambos os TCs a coluna `Observações` está vazia na planilha - a pré-condição de
+  cada um (`Redação enviada` / `Ter redações [corrigidas]`) depende diretamente do fluxo do
+  TC-055 (`Enviar um texto de redação para feedback`), que estava com Status Bloqueado
+  ("A redação não consegue ser salva nem enviada"). Sem uma redação corrigida, não há como
+  chegar até a tela de feedback (TC-056) nem popular o histórico (TC-057).
+- **Causa raiz:** Mesma causa raiz já documentada e corrigida no TC-055/TC-144/TC-145 acima
+  (`app/services/redacao_ai_service.py::corrigir_redacao_enem`, `max_tokens` insuficiente +
+  ausência de strip de cercas markdown antes do `json.loads`, causando
+  `POST /redacoes/aluno/submeter` falhar sempre). Verificado nesta rodada que a correção
+  aplicada permanece no código (`redacao_ai_service.py:348` `max_tokens=6000`, linhas 353-360
+  removem cercas ` ```json `) e já está commitada (commit `532eaed`). Adicionalmente:
+  - TC-056: o prompt de `corrigir_redacao_enem` (`redacao_ai_service.py:249-340`) já pede
+    explicitamente "seja encorajador mas honesto" (linha 278, quando há `aluno_info`) e o JSON
+    de resposta já é estruturado em `pontos_fortes` + `pontos_melhoria` + `sugestoes`
+    (linhas 330-332), ou seja, o formato "o que o aluno fez bem" + "próximo passo" já existe
+    estruturalmente - não há bug adicional de conteúdo a corrigir aqui além de destravar o envio.
+  - TC-057: `GET /redacoes/aluno/{aluno_id}/historico`
+    (`app/api/routes/redacoes.py:592-660`) já está implementado corretamente - agrega total,
+    corrigidas, médias por competência, evolução (últimas 10) e lista resumida com
+    `verificar_acesso_aluno` (proteção contra IDOR). Não há bug de código nesta rota; ela só
+    fica vazia (`total_redacoes=0`) enquanto nenhuma redação for submetida com sucesso.
+- **Ação tomada:** Nenhuma alteração adicional de código - a correção que desbloqueia ambos já
+  foi feita para TC-055/TC-144/TC-145 (não é duplicação de trabalho, é a mesma causa raiz).
+- **Justificativa:** Como as Observações destes dois TCs estão vazias e as pré-condições exigem
+  exatamente o fluxo que estava quebrado no TC-055, o mais provável é que sejam bloqueios em
+  cascata do mesmo bug, não defeitos próprios. **Requer confirmação do usuário via reteste**
+  (junto com TC-055/TC-144/TC-145): depois que uma redação for submetida com sucesso, confirmar
+  se o feedback de fato aparece com tom acolhedor (TC-056) e se o histórico lista a redação
+  corrigida (TC-057). Se algum dos dois falhar mesmo após a redação ser aceita, será um bug
+  distinto a investigar em rodada futura.
+
 ---
 
 ## Comunicação Família

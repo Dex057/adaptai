@@ -90,6 +90,38 @@ async def lifespan(app: FastAPI):
             "(recuperacao de senha, notificacoes) esta desabilitado"
         )
 
+    # ========== tokenmeter: rastreamento de consumo de tokens de LLM ==========
+    # Inicializacao unica. A captura em si acontece em app/core/anthropic_client.py,
+    # que envolve o singleton do client - nenhuma feature precisa chamar nada.
+    # Falha aqui nunca derruba o startup: sem tokenmeter, a app roda sem tracking.
+    try:
+        import tokenmeter as tm
+        from app.core.features import FEATURES
+
+        tm.configure(
+            dsn=settings.db_url,                 # mesmo MySQL, conexao e transacao proprias
+            service="adaptai",
+            # Deriva do helper do proprio projeto, nao da env var: ENVIRONMENT tem
+            # default "development" e a deteccao real de producao no Railway vem de
+            # RAILWAY_PROJECT_ID. Sem isso, todo evento de producao sairia rotulado
+            # "development" e contaminaria o relatorio em silencio.
+            environment="production" if IS_PRODUCTION_STARTUP else (
+                settings.ENVIRONMENT or "dev"),
+            deadletter_path=os.environ.get(
+                "TOKENMETER_DEADLETTER",
+                str(Path(__file__).parent.parent / "storage" / "tm-deadletter.jsonl"),
+            ),
+            table_prefix="tm_",
+            known_features=FEATURES,
+            # Mesma politica do create_all acima: schema so e criado fora de producao.
+            # Em producao, rodar `tokenmeter migrate` uma vez (ou versionar no Alembic).
+            migrate_on_start=not IS_PRODUCTION_STARTUP,
+        )
+        logger.info("tokenmeter configurado", extra={"tabela": "tm_usage_event"})
+    except Exception:
+        logger.warning("tokenmeter nao inicializado - app segue sem tracking de tokens",
+                       exc_info=True)
+
     # Cleanup de jobs travados no startup
     try:
         from app.database import SessionLocal
@@ -282,6 +314,29 @@ app.add_middleware(RequestTrackingMiddleware)
 
 from app.core.security_headers import SecurityHeadersMiddleware
 app.add_middleware(SecurityHeadersMiddleware, is_production=IS_PRODUCTION)
+
+
+# ============================================
+# tokenmeter - escopo de atribuicao por request
+# ============================================
+# Abre UM escopo por request. Toda chamada de LLM feita durante o request herda o
+# run_id (que agrupa as N chamadas de um mesmo pipeline) e as tags daqui - sem
+# precisar passar nada por parametro ate a camada de servico.
+#
+# A `feature` ainda nao e definida aqui: ela vem de um tm.context(feature=...) mais
+# interno, no service. Enquanto nao houver, o tokenmeter infere pelo modulo chamador
+# e marca feature_source='inferred' - visivel em `tokenmeter doctor`.
+
+@app.middleware("http")
+async def tokenmeter_context_middleware(request: Request, call_next):
+    try:
+        import tokenmeter as tm
+    except Exception:
+        return await call_next(request)
+
+    with tm.context(tags={"request_path": request.url.path,
+                          "http_method": request.method}):
+        return await call_next(request)
 
 
 # ============================================

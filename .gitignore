@@ -79,3 +79,15 @@ RECRIAR_*.py
 # Arquivamento reversivel (codigo morto movido para ca - nao versionar nem deployar).
 # Reversivel via historico do git e pelos arquivos no disco em _archive/.
 _archive/
+
+# tokenmeter - artefatos de RUNTIME (nunca versionar)
+# O dead-letter guarda eventos que nao puderam ser gravados no banco; e recriado
+# e drenado automaticamente. Versionar geraria conflito a cada deploy e colocaria
+# no git dados de uso (tenant_id, user_id, entity_id) sem motivo.
+storage/tm-deadletter.jsonl
+tm-deadletter.jsonl
+*.jsonl
+
+# A PASTA tokenmeter/ NA RAIZ *DEVE* IR PARA O GIT - e o codigo da biblioteca,
+# nao artefato. Idem app/core/features.py. Esta nota existe so para ninguem
+# adicionar 'tokenmeter/' aqui por engano no futuro.

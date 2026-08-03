@@ -2,15 +2,18 @@
 Service de Geração de Provas Adaptativas (Reforço)
 Gera provas focadas nos pontos fracos identificados pela análise qualitativa
 """
-import anthropic
 from typing import Dict, List
 from sqlalchemy.orm import Session
 from app.core.config import settings
-from app.core.anthropic_client import get_fast_model
+from app.core.anthropic_client import get_anthropic_client, get_fast_model
 from app.core.ai_usage import registrar_uso_ia
 from app.models.prova import Prova, QuestaoGerada, ProvaAluno, TipoQuestao, DificuldadeQuestao, StatusProva
 from app.models.analise_qualitativa import AnaliseQualitativa
 import json
+
+# tokenmeter: atribuicao de consumo de IA (ver app/core/features.py)
+import tokenmeter as tm
+from app.core.features import F
 
 
 class ProvaAdaptativaService:
@@ -28,9 +31,10 @@ class ProvaAdaptativaService:
     def client(self):
         """Lazy initialization do cliente Anthropic"""
         if self._client is None:
-            self._client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+            self._client = get_anthropic_client()
         return self._client
     
+    @tm.feature(F.PROVA_REFORCO, entity_type="prova_aluno", entity_from="prova_aluno_id")
     def gerar_prova_reforco(
         self, 
         db: Session,

@@ -27,6 +27,7 @@ from app.models.student import Student
 from app.models.relatorio import Relatorio
 from app.core.tenant import enforce_limite_relatorios
 from app.schemas.relatorio import (
+
     RelatorioCreate,
     RelatorioUpdate,
     RelatorioResponse,
@@ -34,6 +35,10 @@ from app.schemas.relatorio import (
     RelatorioListResponse,
     RelatorioResumo
 )
+
+# tokenmeter: atribuicao de consumo de IA (ver app/core/features.py)
+import tokenmeter as tm
+from app.core.features import F
 
 router = APIRouter(prefix="/relatorios", tags=["Relatórios de Terapias"])
 
@@ -47,6 +52,7 @@ RELATORIOS_DIR.mkdir(parents=True, exist_ok=True)
 
 # ============= PROCESSAMENTO EM BACKGROUND =============
 
+@tm.feature(F.RELATORIO_UPLOAD, entity_type="relatorio", entity_from="relatorio_id")
 def processar_relatorio_background(
     relatorio_id: int,
     pdf_path: Path,

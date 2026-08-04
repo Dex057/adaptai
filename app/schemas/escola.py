@@ -97,7 +97,9 @@ class EscolaComAssinatura(EscolaResponse):
 # ============================================
 
 class ConfiguracaoEscolaBase(BaseModel):
-    modelo_ia_preferido: Optional[str] = "claude-3-haiku-20240307"
+    # None = usa o modelo padrao da aplicacao. Antes vinha cravado um ID
+    # aposentado, que um PUT sem esse campo reescrevia no banco em silencio.
+    modelo_ia_preferido: Optional[str] = None
     quantidade_questoes_padrao: Optional[int] = 5
     dificuldade_padrao: Optional[str] = "medio"
     notificacoes_email: Optional[bool] = True

@@ -76,7 +76,11 @@ class ConfiguracaoEscola(Base):
     escola_id = Column(Integer, ForeignKey("escolas.id"), nullable=False, unique=True)
     
     # Preferências pedagógicas
-    modelo_ia_preferido = Column(String(100), default=None)   # resolvido em runtime
+    # Sem default cravado: o ID ficava congelado no codigo e envelhecia sozinho
+    # (o valor anterior, claude-3-haiku-20240307, foi aposentado em 20/04/2026 e
+    # continuava sendo gravado em toda escola nova criada por planos.py/seed_demo).
+    # NULL = "usa o modelo padrao da aplicacao", resolvido em runtime.
+    modelo_ia_preferido = Column(String(100), default=None)
     quantidade_questoes_padrao = Column(Integer, default=5)
     dificuldade_padrao = Column(String(20), default="medio")
     

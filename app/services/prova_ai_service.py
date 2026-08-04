@@ -2,7 +2,7 @@
 🤖 AdaptAI - Serviço de Geração de Questões com IA
 Integração com Claude API da Anthropic
 """
-import anthropic
+import anthropic  # tokenmeter: allow  (só para tipos de exceção; client vem do factory)
 import json
 import re
 import asyncio

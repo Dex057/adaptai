@@ -30,6 +30,7 @@ class Recorder:
             try:
                 self.store.write([event])
                 self.stats["written"] += 1
+                self._drenar_oportunista()
                 return
             except Exception:
                 if attempt == self.retries:
@@ -52,6 +53,24 @@ class Recorder:
             self.stats["lost"] += 1
             log.warning("tokenmeter: evento perdido (dead-letter indisponível)", exc_info=True)
         # nunca re-raise. jamais.
+
+    def _drenar_oportunista(self) -> None:
+        """Se acabamos de gravar com sucesso e há coisa no dead-letter, drena agora.
+
+        Sem isso, o dead-letter só era reprocessado no startup — o que basta quando o
+        banco é local, mas não quando ele é remoto e pode ficar fora por horas: os
+        eventos ficariam no disco até o próximo deploy.
+
+        Barato: só toca o disco quando o contador indica que há pendência, e a própria
+        escrita que acabou de funcionar é a prova de que o banco voltou. Nunca levanta
+        exceção — é oportunista, não obrigatório.
+        """
+        if self.stats["deadlettered"] <= self.stats["replayed"]:
+            return
+        try:
+            self.drain()
+        except Exception:
+            log.debug("tokenmeter: drain oportunista falhou", exc_info=True)
 
     def drain(self) -> int:
         """Reprocessa o dead-letter. Idempotente: o SELECT de existência no store cobre replay."""

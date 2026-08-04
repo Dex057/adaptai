@@ -76,7 +76,7 @@ class ConfiguracaoEscola(Base):
     escola_id = Column(Integer, ForeignKey("escolas.id"), nullable=False, unique=True)
     
     # Preferências pedagógicas
-    modelo_ia_preferido = Column(String(100), default="claude-3-haiku-20240307")
+    modelo_ia_preferido = Column(String(100), default=None)   # resolvido em runtime
     quantidade_questoes_padrao = Column(Integer, default=5)
     dificuldade_padrao = Column(String(20), default="medio")
     

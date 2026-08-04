@@ -88,6 +88,16 @@ storage/tm-deadletter.jsonl
 tm-deadletter.jsonl
 *.jsonl
 
+# Saida do kit de validacao local (examples/validar_local.py): gerada a cada
+# execucao, em SQLite descartavel, so para conferir localmente antes de subir.
+# Nao e amostra nem documentacao -- isso e o painel-exemplo.html em docs/.
+tokenmeter/extrato-local.csv
+tokenmeter/painel-local.html
+
 # A PASTA tokenmeter/ NA RAIZ *DEVE* IR PARA O GIT - e o codigo da biblioteca,
 # nao artefato. Idem app/core/features.py. Esta nota existe so para ninguem
 # adicionar 'tokenmeter/' aqui por engano no futuro.
+
+# Claude Code - permissoes/aprovacoes de sessao, especificas desta maquina.
+# agents/ e commands/ (compartilhados pelo time) NAO entram aqui.
+.claude/settings.local.json

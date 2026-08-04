@@ -7,3 +7,8 @@
 # consumo nao medido.
 allowed_client_modules = ["app.core.anthropic_client"]
 providers = ["anthropic"]
+# Codigo de demonstracao/diagnostico manual, fora do caminho de producao:
+# examples/ e o kit de validacao local da propria lib tokenmeter (constroi
+# um client fake de proposito); testar_tokens.py e script avulso do time
+# para checagem manual de consumo, nunca chamado pela aplicacao.
+exclude = ["examples", "testar_tokens.py"]

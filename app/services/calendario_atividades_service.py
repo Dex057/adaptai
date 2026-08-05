@@ -15,18 +15,33 @@ from app.models.atividade_pei import AtividadePEI, SequenciaObjetivo, TipoAtivid
 from app.models.material import Material, MaterialAluno, StatusMaterial, TipoMaterial
 from app.models.prova import Prova, QuestaoGerada, ProvaAluno, StatusProva, StatusProvaAluno, TipoQuestao, DificuldadeQuestao
 
+# tokenmeter: atribuicao de consumo de IA (ver app/core/features.py)
+import tokenmeter as tm
+from app.core.features import F
+from app.core.anthropic_client import get_default_model
+
 
 # Cliente Anthropic
 _client = None
-MODELO_IA = "claude-3-5-sonnet-20241022"
+# Era "claude-3-5-sonnet-20241022", que a Anthropic aposentou em 28/10/2025.
+# Sem uso registrado neste caminho (nenhum material com tipo_geracao='ia_pei' no
+# banco), entao era bug latente, nao falha ativa.
+# Resolvido em tempo de import a partir de settings.CLAUDE_MODEL.
+MODELO_IA = get_default_model()
 
 
 def get_anthropic_client():
+    """Delega ao singleton central (app/core/anthropic_client.py).
+
+    Mantido como funcao local para nao mexer nos pontos de chamada. Preserva o
+    contrato antigo de devolver None em caso de falha, em vez de propagar.
+    """
     global _client
     if _client is None:
         try:
-            from anthropic import Anthropic
-            _client = Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+            from app.core.anthropic_client import get_anthropic_client as _central
+
+            _client = _central()
         except Exception as e:
             print(f"[AVISO] Erro ao inicializar Anthropic: {e}")
     return _client
@@ -395,6 +410,7 @@ class CalendarioAtividadesService:
         
         return resultado
     
+    @tm.feature(F.CALENDARIO_ATIVIDADES, entity_type="pei", entity_from="pei")
     async def _criar_material_para_objetivo(
         self,
         pei: PEI,
@@ -509,6 +525,7 @@ Retorne APENAS o JSON."""
             print(f"[ERRO] Criando material: {e}")
             return None
     
+    @tm.feature(F.CALENDARIO_ATIVIDADES, entity_type="pei", entity_from="pei")
     async def _criar_prova_para_objetivo(
         self,
         pei: PEI,

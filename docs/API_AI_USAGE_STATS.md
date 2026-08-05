@@ -4,7 +4,7 @@ Referência de uso do endpoint que devolve o consumo de tokens/custo do Claude,
 agregado por feature e por modelo. Implementação: `app/api/routes/admin_monitoring.py`.
 Fonte dos dados: tabela `ai_usage_log`, gravada por `app/core/ai_usage.registrar_uso_ia()`
 após cada chamada real a Claude em PEI, jornada terapêutica, planejamento, análise
-qualitativa e prova de reforço.
+qualitativa, prova de reforço e upload/extração de laudo.
 
 ---
 
@@ -24,7 +24,7 @@ GET /api/v1/admin/ai-usage/stats
 | Param | Tipo | Efeito |
 |---|---|---|
 | `dias` | int | Filtra chamadas dos últimos N dias (default `30`) |
-| `feature` | string | Filtra só uma funcionalidade — valores possíveis: `pei_analise_laudo`, `pei_geracao`, `jornada_terapeutica`, `planejamento_anual`, `planejamento_trimestre`, `planejamento_anual_completo`, `analise_qualitativa`, `prova_reforco` |
+| `feature` | string | Filtra só uma funcionalidade — valores possíveis: `pei_analise_laudo`, `pei_geracao`, `jornada_terapeutica`, `planejamento_anual`, `planejamento_trimestre`, `planejamento_anual_completo`, `analise_qualitativa`, `prova_reforco`, `relatorio_upload` |
 | `user_id` | int | Filtra só chamadas atribuídas a esse usuário (professor/admin logado que disparou a ação) |
 | `student_id` | int | Filtra só chamadas relacionadas a esse aluno |
 
@@ -38,6 +38,7 @@ GET /api/v1/admin/ai-usage/stats
 | `planejamento_trimestre` | ❌ | ✅ |
 | `planejamento_anual_completo` | ❌ | ❌ |
 | `analise_qualitativa`, `prova_reforco` | ❌ | ❌ |
+| `relatorio_upload` | ✅ | ✅ |
 
 Filtrar por `user_id`/`student_id` numa feature que não grava esse campo simplesmente devolve zero resultados — não é erro, é ausência de dado.
 

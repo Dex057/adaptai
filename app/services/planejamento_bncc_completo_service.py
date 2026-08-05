@@ -31,6 +31,10 @@ from app.models.planejamento_job import PlanejamentoJob, PlanejamentoJobLog, Job
 
 from app.core.logging_config import get_logger
 
+# tokenmeter: atribuicao de consumo de IA (ver app/core/features.py)
+import tokenmeter as tm
+from app.core.features import F
+
 logger = get_logger(__name__)
 
 
@@ -763,6 +767,7 @@ IMPORTANTE:
     # PROCESSAMENTO PRINCIPAL
     # ============================================
     
+    @tm.feature(F.PLANEJAMENTO_ANUAL_COMPLETO, entity_type="aluno", entity_from="student_id")
     async def gerar_planejamento_completo(
         self,
         student_id: int,

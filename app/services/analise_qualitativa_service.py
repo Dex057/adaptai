@@ -2,12 +2,15 @@
 Service de Análise Qualitativa com IA
 Analisa respostas dos alunos e gera insights sobre o que melhorar
 """
-import anthropic
 from typing import Dict, List
 from app.core.config import settings
-from app.core.anthropic_client import get_fast_model
+from app.core.anthropic_client import get_anthropic_client, get_fast_model
 from app.core.ai_usage import registrar_uso_ia
 from app.models.prova import ProvaAluno, RespostaAluno, QuestaoGerada, StatusProvaAluno
+
+# tokenmeter: atribuicao de consumo de IA (ver app/core/features.py)
+import tokenmeter as tm
+from app.core.features import F
 
 
 class AnaliseQualitativaService:
@@ -25,9 +28,10 @@ class AnaliseQualitativaService:
     def client(self):
         """Lazy initialization do cliente Anthropic"""
         if self._client is None:
-            self._client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+            self._client = get_anthropic_client()
         return self._client
     
+    @tm.feature(F.ANALISE_QUALITATIVA, entity_type="prova_aluno", entity_from="prova_aluno")
     def gerar_analise(self, prova_aluno: ProvaAluno) -> Dict:
         """
         Gera análise qualitativa completa de uma prova

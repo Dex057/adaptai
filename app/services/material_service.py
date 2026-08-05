@@ -1,9 +1,13 @@
 """
 Service para geração de materiais com IA
 """
-import anthropic
+from app.core.anthropic_client import get_anthropic_client, get_default_model
 import json
 from app.core.config import settings
+
+# tokenmeter: atribuicao de consumo de IA (ver app/core/features.py)
+import tokenmeter as tm
+from app.core.features import F
 
 
 class MaterialGeracaoService:
@@ -12,15 +16,22 @@ class MaterialGeracaoService:
     def __init__(self):
         """Inicializa o cliente da Anthropic (lazy)"""
         self._client = None
-        self.model = "claude-3-5-sonnet-20241022"
+        # Era "claude-3-5-sonnet-20241022", introduzido no commit c0b0515 (13/01/2026)
+        # - um modelo que a Anthropic ja havia aposentado em 28/10/2025. A linha nunca
+        # chegou a executar (a tabela `materiais` so tem 3 registros, todos de nov/2025
+        # e todos com status=disponivel), entao NAO houve falha em producao: era um bug
+        # latente, que dispararia no proximo uso da feature.
+        # get_default_model() resolve settings.CLAUDE_MODEL e nao envelhece sozinho.
+        self.model = get_default_model()
     
     @property
     def client(self):
         """Lazy initialization do cliente Anthropic"""
         if self._client is None:
-            self._client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+            self._client = get_anthropic_client()
         return self._client
     
+    @tm.feature(F.MATERIAL_ADAPTADO)
     def gerar_material_visual(self, titulo: str, conteudo: str, materia: str, serie: str, adaptacoes: list = None) -> dict:
         """
         Gera um material visual rico em HTML
@@ -122,6 +133,7 @@ NÃO inclua explicações, apenas o HTML puro e bem formatado."""
                 "error": str(e)
             }
     
+    @tm.feature(F.MATERIAL_ADAPTADO)
     def gerar_mapa_mental(self, titulo: str, conteudo: str, materia: str, serie: str, adaptacoes: list = None) -> dict:
         """
         Gera um mapa mental estruturado em JSON
@@ -220,6 +232,7 @@ RETORNE APENAS O JSON, sem explicações ou markdown."""
                 "error": str(e)
             }
 
+    @tm.feature(F.MATERIAL_ADAPTADO)
     def gerar_material_texto(self, formato: str, titulo: str, conteudo: str, materia: str, serie: str, adaptacoes: list = None) -> dict:
         """
         Gera materiais textuais em HTML para os formatos de adaptacao:

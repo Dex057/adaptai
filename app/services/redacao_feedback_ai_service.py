@@ -11,10 +11,15 @@ from typing import Any, Dict, Optional
 
 from app.core.anthropic_client import get_anthropic_client, get_default_model
 
+# tokenmeter: atribuicao de consumo de IA (ver app/core/features.py)
+import tokenmeter as tm
+from app.core.features import F
+
 
 class RedacaoFeedbackAIService:
     """Servico de IA para feedback formativo de redacao."""
 
+    @tm.feature(F.REDACAO_FEEDBACK)
     async def gerar_feedback(
         self,
         texto: str,

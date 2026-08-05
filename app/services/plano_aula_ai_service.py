@@ -11,10 +11,15 @@ from typing import List, Optional
 
 from app.services.ai_cache_service import cached_completion
 
+# tokenmeter: atribuicao de consumo de IA (ver app/core/features.py)
+import tokenmeter as tm
+from app.core.features import F
+
 
 class PlanoAulaAIService:
     """Servico de IA para plano de aula simples."""
 
+    @tm.feature(F.PLANO_AULA)
     def gerar(
         self,
         componente: str,

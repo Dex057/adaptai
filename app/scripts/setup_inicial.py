@@ -18,6 +18,7 @@ from app.models.student import Student
 from app.models.escola import Escola, ConfiguracaoEscola
 from app.core.security import get_password_hash
 from datetime import datetime, timezone
+from app.core.anthropic_client import get_default_model
 
 
 def get_or_create_user(db: Session, email: str, name: str, password: str, role: UserRole, escola_id: int = None) -> User:
@@ -88,7 +89,8 @@ def criar_escola_demo(db: Session) -> Escola:
     # Criar configuração da escola
     config = ConfiguracaoEscola(
         escola_id=escola.id,
-        modelo_ia="claude-3-5-sonnet-20241022",
+        # Era "claude-3-5-sonnet-20241022", aposentado em 28/10/2025.
+        modelo_ia=get_default_model(),
         permite_pei=True,
         permite_materiais_adaptados=True,
         max_alunos=100,

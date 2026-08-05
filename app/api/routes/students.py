@@ -5,8 +5,8 @@ Gerenciamento de alunos com filtro por professor/escola
 from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
-from sqlalchemy import or_
-from typing import List, Optional
+from sqlalchemy import or_, asc, desc
+from typing import List, Literal, Optional
 import csv
 import io
 import uuid
@@ -112,7 +112,7 @@ def create_student(
         hashed_password=hashed_password,
         is_active=True,
         birth_date=student_data.birth_date,
-        grade_level=student_data.grade_level or "Não especificado",
+        grade_level=student_data.grade_level,  # TC-017: agora obrigatorio no schema (StudentCreate)
         turma=student_data.turma if hasattr(student_data, 'turma') else None,
         matricula=student_data.matricula if hasattr(student_data, 'matricula') else None,
         diagnosis=student_data.diagnosis,
@@ -138,21 +138,28 @@ def list_students(
     search: str = Query(None, description="Buscar por nome"),
     todos: bool = Query(False, description="Admin: listar todos da escola"),
     arquivados: bool = Query(False, description="Listar apenas alunos arquivados (inativos)"),
+    ordenar_por: Literal["name", "grade_level", "created_at"] = Query(
+        "name", description="Campo de ordenação"
+    ),
+    direcao: Literal["asc", "desc"] = Query("asc", description="Direção da ordenação"),
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """
     📋 Listar estudantes
-    
+
     - **Professor**: Vê apenas seus próprios alunos
     - **Coordenador/Admin**: Vê alunos da escola (ou só seus se `todos=False`)
     - **Super Admin**: Vê todos os alunos do sistema
-    
+
     Filtros disponíveis:
     - `grade_level`: Filtrar por série (ex: "5º ano")
     - `turma`: Filtrar por turma (ex: "A", "Manhã")
     - `search`: Buscar por nome
     - `todos`: Admin pode ver todos da escola
+
+    Ordenação (`ordenar_por` + `direcao`, default `name`/`asc`, comportamento
+    anterior preservado): TC-107.
     """
     # Obter query base baseada no papel
     if todos and current_user.role in [UserRole.ADMIN, UserRole.COORDINATOR, UserRole.SUPER_ADMIN]:
@@ -177,9 +184,10 @@ def list_students(
     if search:
         query = query.filter(Student.name.ilike(f"%{search}%"))
     
-    # Ordenar por nome
-    query = query.order_by(Student.name)
-    
+    # Ordenar (allowlist via Literal do parametro - TC-107)
+    coluna = getattr(Student, ordenar_por)
+    query = query.order_by(desc(coluna) if direcao == "desc" else asc(coluna))
+
     students = query.offset(skip).limit(limit).all()
     return students
 

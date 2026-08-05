@@ -20,6 +20,10 @@ from app.models.diario_aprendizagem import (
 )
 from app.models.student import Student
 
+# tokenmeter: atribuicao de consumo de IA (ver app/core/features.py)
+import tokenmeter as tm
+from app.core.features import F
+
 
 class DiarioAIService:
     """
@@ -35,6 +39,7 @@ class DiarioAIService:
         """Acesso ao cliente Anthropic centralizado (lazy)."""
         return get_anthropic_client()
     
+    @tm.feature(F.DIARIO_APRENDIZAGEM, entity_type="diario", entity_from="diario")
     async def analisar_registro(
         self,
         db: Session,
@@ -268,6 +273,7 @@ Retorne APENAS o JSON, sem explicações."""
         
         return min(10, prioridade)
     
+    @tm.feature(F.DIARIO_RESUMO_SEMANAL, entity_type="aluno", entity_from="student_id")
     async def gerar_resumo_semanal(
         self,
         db: Session,

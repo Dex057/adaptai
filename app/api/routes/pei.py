@@ -16,6 +16,10 @@ from app.models.user import User
 from app.models.relatorio import Relatorio
 from app.models.student import Student
 
+# tokenmeter: atribuicao de consumo de IA (ver app/core/features.py)
+import tokenmeter as tm
+from app.core.features import F
+
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/pei", tags=["PEI - Plano Educacional Individualizado"])
@@ -29,6 +33,7 @@ MODELO_VISAO = get_default_model()
 
 
 @router.post("/analisar-laudo")
+@tm.feature(F.PEI_ANALISE_LAUDO)
 async def analisar_laudo(
     request: Request,
     arquivo: UploadFile = File(...),
@@ -253,6 +258,7 @@ MODELO_PEI_TEXTO = get_default_model()
 
 
 @router.post("/gerar-pei-de-relatorios")
+@tm.feature(F.PEI_GERACAO)
 async def gerar_pei_de_relatorios(
     data: dict,
     request: Request,

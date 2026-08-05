@@ -30,6 +30,10 @@ from app.models.ai_cache import AICache
 from app.core.anthropic_client import get_anthropic_client, get_default_model
 from app.core.logging_config import get_logger
 
+# tokenmeter: atribuicao de consumo de IA (ver app/core/features.py)
+import tokenmeter as tm
+from app.core.features import F
+
 logger = get_logger(__name__)
 
 
@@ -160,6 +164,7 @@ def save_cache(
         db.close()
 
 
+@tm.feature(None, tags_from={"material_tipo": "cache_type"})
 def cached_completion(
     prompt: str,
     model: Optional[str] = None,

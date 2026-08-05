@@ -50,33 +50,72 @@ _client = None
 _client_lock = Lock()
 
 
-def get_anthropic_client():
+def _instrumentar(client):
+    """Envolve o client com o tokenmeter, se o pacote estiver disponivel.
+
+    A partir daqui, TODA chamada feita com este client gera um registro de consumo -
+    sem uma linha extra por feature. Este e o unico ponto de instrumentacao do
+    projeto; por isso `tokenmeter check` bloqueia a construcao de Anthropic() em
+    qualquer outro modulo.
+
+    O import e guardado de proposito: se o pacote nao estiver instalado (ambiente de
+    teste, container antigo, rollback), a aplicacao continua funcionando SEM tracking,
+    em vez de quebrar no startup. Perder telemetria e aceitavel; derrubar a API nao e.
     """
-    Retorna a instancia unica do cliente Anthropic.
+    try:
+        import tokenmeter
+        return tokenmeter.wrap(client)
+    except Exception:  # pragma: no cover - pacote ausente ou incompativel
+        return client
+
+
+def get_anthropic_client(*, timeout=None, max_retries=None):
+    """
+    Retorna a instancia unica do cliente Anthropic (ja instrumentada).
     Inicializacao lazy + thread-safe (primeira chamada), segura em multi-thread.
-    
+
+    Args:
+        timeout: sobrescreve o timeout so para este uso (nao afeta o singleton).
+        max_retries: idem para retries de rede.
+        Quando qualquer um dos dois e informado, devolve um client derivado via
+        `.with_options()` - que continua instrumentado.
+
     Raises:
         RuntimeError: se ANTHROPIC_API_KEY nao estiver configurada.
     """
     global _client
-    if _client is not None:
+    if _client is None:
+        with _client_lock:
+            # Double-check apos obter lock
+            if _client is None:
+                if not settings.ANTHROPIC_API_KEY or not settings.ANTHROPIC_API_KEY.strip():
+                    raise RuntimeError(
+                        "ANTHROPIC_API_KEY nao configurada. "
+                        "Defina no .env ou nas variaveis de ambiente do Railway."
+                    )
+                # Import lazy - evita erro na inicializacao se anthropic nao estiver instalado
+                from anthropic import Anthropic
+                _client = _instrumentar(Anthropic(api_key=settings.ANTHROPIC_API_KEY))
+
+    if timeout is None and max_retries is None:
         return _client
-    
-    with _client_lock:
-        # Double-check apos obter lock
-        if _client is not None:
-            return _client
-        
-        if not settings.ANTHROPIC_API_KEY or not settings.ANTHROPIC_API_KEY.strip():
-            raise RuntimeError(
-                "ANTHROPIC_API_KEY nao configurada. "
-                "Defina no .env ou nas variaveis de ambiente do Railway."
-            )
-        # Import lazy - evita erro na inicializacao se anthropic nao estiver instalado
+
+    opcoes = {}
+    if timeout is not None:
+        opcoes["timeout"] = timeout
+    if max_retries is not None:
+        opcoes["max_retries"] = max_retries
+
+    try:
+        # `.with_options()` devolve um client derivado; o tokenmeter re-embrulha o
+        # resultado, entao o derivado continua sendo medido.
+        return _client.with_options(**opcoes)
+    except (AttributeError, TypeError):
+        # SDK antigo ou sem suporte a with_options: cai para uma instancia propria
+        # com as mesmas opcoes. Custa um handshake TLS a mais, mas nao derruba a
+        # feature nem perde o tracking - as duas coisas que nao podem acontecer.
         from anthropic import Anthropic
-        _client = Anthropic(api_key=settings.ANTHROPIC_API_KEY)
-    
-    return _client
+        return _instrumentar(Anthropic(api_key=settings.ANTHROPIC_API_KEY, **opcoes))
 
 
 def reset_anthropic_client():

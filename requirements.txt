@@ -23,6 +23,13 @@ python-multipart==0.0.6
 
 # IA - Anthropic Claude (versao compativel)
 anthropic>=0.39.0
+
+# Rastreamento de consumo de tokens.
+# O pacote vive em ./tokenmeter (raiz do repo) - nao precisa instalar.
+# Dependencias dele: sqlalchemy (ja acima) e PyYAML.
+# PyYAML hoje chega por tabela via uvicorn[standard]; declarado explicito aqui
+# para nao quebrar em silencio se alguem tirar o extra [standard].
+PyYAML>=6.0
 # FIX: httpx >= 0.28 removeu o kwarg 'app' do Client.__init__, quebrando
 # o TestClient do starlette 0.27.x (usado pelo fastapi 0.104). Fixar limite
 # superior ate fastapi/starlette serem atualizados.

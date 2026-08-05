@@ -12,6 +12,10 @@ from app.core.anthropic_client import get_anthropic_client, get_default_model
 from app.services.ai_cache_service import lookup_cache, save_cache
 from app.core.logging_config import get_logger
 
+# tokenmeter: atribuicao de consumo de IA (ver app/core/features.py)
+import tokenmeter as tm
+from app.core.features import F
+
 logger = get_logger(__name__)
 
 
@@ -23,6 +27,7 @@ class MaterialAdaptadoService:
         self.client = get_anthropic_client()
         self.model = get_default_model()
     
+    @tm.feature(F.MATERIAL_ADAPTADO, tags_from={"material_tipo": "cache_type"})
     def _chamar_ia(self, prompt: str, max_tokens: int = 2048, cache_type: str = "material") -> Dict[str, Any]:
         """
         Chama a IA e processa resposta JSON.

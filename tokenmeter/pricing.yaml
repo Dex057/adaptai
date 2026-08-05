@@ -1,0 +1,76 @@
+# Tabela de preços — USD por 1.000.000 de tokens.
+# Fonte oficial: https://platform.claude.com/docs/en/about-claude/pricing
+#
+# Regras:
+#  - specificity: maior vence quando dois padrões casam com o mesmo modelo.
+#  - effective_from / effective_to: vigência em UTC. 'to' vazio = vigente.
+#  - reviewed_at: alimenta o alerta de envelhecimento do `tokenmeter doctor`.
+#
+# Override sem deploy: aponte TOKENMETER_PRICING para outro arquivo com este formato.
+
+version: "2026-07-31"
+reviewed_at: "2026-07-31"
+source: "https://platform.claude.com/docs/en/about-claude/pricing"
+
+prices:
+  # --- Sonnet 5: preço introdutório expira em 01/09/2026 -------------------
+  # É o caso real que justifica vigência temporal em vez de "preço corrente".
+  - provider: anthropic
+    model_pattern: "claude-sonnet-5*"
+    specificity: 20
+    effective_from: "2026-01-01T00:00:00"
+    effective_to:   "2026-09-01T00:00:00"
+    input_per_mtok:       "2"
+    output_per_mtok:      "10"
+    cache_write_per_mtok: "2.50"
+    cache_read_per_mtok:  "0.20"
+  - provider: anthropic
+    model_pattern: "claude-sonnet-5*"
+    specificity: 20
+    effective_from: "2026-09-01T00:00:00"
+    effective_to:   null
+    input_per_mtok:       "3"
+    output_per_mtok:      "15"
+    cache_write_per_mtok: "3.75"
+    cache_read_per_mtok:  "0.30"
+
+  - provider: anthropic
+    model_pattern: "claude-sonnet-4*"
+    specificity: 15
+    effective_from: "2025-01-01T00:00:00"
+    effective_to:   null
+    input_per_mtok:       "3"
+    output_per_mtok:      "15"
+    cache_write_per_mtok: "3.75"
+    cache_read_per_mtok:  "0.30"
+
+  - provider: anthropic
+    model_pattern: "claude-opus-5*"
+    specificity: 20
+    effective_from: "2026-01-01T00:00:00"
+    effective_to:   null
+    input_per_mtok:       "5"
+    output_per_mtok:      "25"
+    cache_write_per_mtok: "6.25"
+    cache_read_per_mtok:  "0.50"
+
+  - provider: anthropic
+    model_pattern: "claude-haiku-4-5*"
+    specificity: 20
+    effective_from: "2025-10-01T00:00:00"
+    effective_to:   null
+    input_per_mtok:       "1"
+    output_per_mtok:      "5"
+    cache_write_per_mtok: "1.25"
+    cache_read_per_mtok:  "0.10"
+
+# DELIBERADAMENTE SEM CURINGA "claude-*".
+#
+# Um curinga daria preço de Sonnet a QUALQUER modelo desconhecido — inclusive a um
+# Haiku (3x mais barato) ou a um modelo novo mais caro. Pior: o evento sairia com
+# priced=1, então o alarme de "modelo sem preço" do `doctor` nunca dispararia, e o
+# relatório mentiria com cara de certo.
+#
+# Sem curinga, modelo desconhecido grava com cost_usd=NULL e priced=0: os tokens não
+# se perdem, o `doctor` acusa, e um reprocessamento posterior precifica. Custo
+# desconhecido e visível é melhor que custo errado e invisível.

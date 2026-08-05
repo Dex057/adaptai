@@ -19,6 +19,7 @@ import time
 from app.database import get_db, SessionLocal
 from app.core.config import settings
 from app.core.anthropic_client import get_anthropic_client, get_default_model
+from app.core.ai_usage import registrar_uso_ia
 from app.api.dependencies import get_current_active_user, verificar_acesso_aluno
 from app.core.pagination import PaginationParams, build_page
 from app.models.user import User
@@ -26,6 +27,7 @@ from app.models.student import Student
 from app.models.relatorio import Relatorio
 from app.core.tenant import enforce_limite_relatorios
 from app.schemas.relatorio import (
+
     RelatorioCreate,
     RelatorioUpdate,
     RelatorioResponse,
@@ -33,6 +35,10 @@ from app.schemas.relatorio import (
     RelatorioListResponse,
     RelatorioResumo
 )
+
+# tokenmeter: atribuicao de consumo de IA (ver app/core/features.py)
+import tokenmeter as tm
+from app.core.features import F
 
 router = APIRouter(prefix="/relatorios", tags=["Relatórios de Terapias"])
 
@@ -46,11 +52,15 @@ RELATORIOS_DIR.mkdir(parents=True, exist_ok=True)
 
 # ============= PROCESSAMENTO EM BACKGROUND =============
 
+@tm.feature(F.RELATORIO_UPLOAD, entity_type="relatorio", entity_from="relatorio_id")
 def processar_relatorio_background(
     relatorio_id: int,
     pdf_path: Path,
     json_path: Path,
-    content_type: str
+    content_type: str,
+    student_id: int = None,
+    user_id: int = None,
+    escola_id: int = None
 ):
     """
     Processa o relatório com IA em background
@@ -123,15 +133,24 @@ Estrutura:
                 }
             ],
         )
-        
+
+        registrar_uso_ia(
+            feature="relatorio_upload",
+            model=MODELO_VISAO,
+            usage=message.usage,
+            student_id=student_id,
+            user_id=user_id,
+            escola_id=escola_id,
+        )
+
         # Extrair resposta
         response_text = message.content[0].text.strip()
-        
+
         # Limpar markdown
         for marker in ["```json", "```"]:
             response_text = response_text.replace(marker, "")
         response_text = response_text.strip()
-        
+
         try:
             dados_extraidos = json.loads(response_text)
         except json.JSONDecodeError:
@@ -598,7 +617,10 @@ async def upload_e_analisar_relatorio(
         novo_relatorio.id,
         pdf_path,
         json_path,
-        content_type
+        content_type,
+        student_id,
+        current_user.id,
+        getattr(current_user, "escola_id", None)
     )
     
     print(f"🚀 Processamento em background iniciado!")
@@ -622,7 +644,9 @@ async def _processar_relatorio_incremental_bg(
     pdf_path: Path,
     json_path: Path,
     content_type: str,
-    user_id: int
+    user_id: int,
+    student_id: int = None,
+    escola_id: int = None
 ):
     """
     Wrapper assincrono para processar relatorio de forma incremental.
@@ -638,7 +662,9 @@ async def _processar_relatorio_incremental_bg(
             pdf_path=pdf_path,
             json_path=json_path,
             content_type=content_type,
-            user_id=user_id
+            user_id=user_id,
+            student_id=student_id,
+            escola_id=escola_id
         )
     except Exception as e:
         print(f"[INCREMENTAL] Erro: {type(e).__name__}")
@@ -743,7 +769,9 @@ async def upload_e_analisar_rapido(
         pdf_path,
         json_path,
         content_type,
-        current_user.id
+        current_user.id,
+        student_id,
+        getattr(current_user, "escola_id", None)
     )
 
     return {

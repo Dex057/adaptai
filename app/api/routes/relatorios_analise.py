@@ -17,6 +17,11 @@ from app.api.dependencies import get_current_active_user
 from app.models.user import User
 from app.models.student import Student
 from app.models.relatorio import Relatorio
+from app.services.ai_cache_service import _hash_prompt, lookup_cache, save_cache
+
+# tokenmeter: atribuicao de consumo de IA (ver app/core/features.py)
+import tokenmeter as tm
+from app.core.features import F
 
 router = APIRouter(prefix="/relatorios", tags=["Relatórios - Análise Consolidada"])
 
@@ -24,16 +29,22 @@ router = APIRouter(prefix="/relatorios", tags=["Relatórios - Análise Consolida
 RELATORIOS_DIR = Path(__file__).parent.parent.parent.parent / "storage" / "relatorios"
 
 def get_anthropic_client():
-    """Obtém cliente Anthropic"""
+    """Delega ao singleton central (app/core/anthropic_client.py).
+
+    Mantido como funcao local para nao mexer nos pontos de chamada. Preserva o
+    contrato antigo de devolver None em caso de falha, em vez de propagar.
+    """
     try:
-        from anthropic import Anthropic
-        return Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+        from app.core.anthropic_client import get_anthropic_client as _central
+
+        return _central()
     except Exception as e:
         print(f"[AVISO] Erro ao inicializar Anthropic: {e}")
         return None
 
 
 @router.get("/student/{student_id}/analise-consolidada")
+@tm.feature(F.JORNADA_TERAPEUTICA, entity_type="aluno", entity_from="student_id")
 async def gerar_analise_consolidada(
     student_id: int,
     db: Session = Depends(get_db),
@@ -197,46 +208,66 @@ IMPORTANTE:
 """
 
     try:
-        print(f"🤖 Gerando análise consolidada para {student.name}...")
-        
         modelo_usado = get_default_model()
-        message = client.messages.create(
-            model=modelo_usado,
-            max_tokens=8000,
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt
+
+        # TC-141: a Jornada Terapeutica reprocessava a IA do zero a CADA abertura,
+        # mesmo sem relatorio novo desde a ultima analise. O prompt ja embute todos
+        # os dados_extraidos dos relatorios do aluno, entao o mesmo conjunto de
+        # relatorios produz o mesmo hash -> cache hit. Um laudo novo/editado muda o
+        # conteudo do prompt -> hash diferente -> reprocessa automaticamente.
+        prompt_hash = _hash_prompt(prompt, {"max_tokens": 8000, "feature": "jornada_terapeutica"})
+        cached = lookup_cache(prompt_hash, modelo_usado, ttl_hours=24 * 30)
+
+        if cached and isinstance(cached, dict) and "analise_ia" in cached:
+            print(f"⚡ Jornada consolidada (cache) para {student.name}")
+            analise_ia = cached["analise_ia"]
+        else:
+            print(f"🤖 Gerando análise consolidada para {student.name}...")
+            message = client.messages.create(
+                model=modelo_usado,
+                max_tokens=8000,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+            )
+
+            registrar_uso_ia(
+                feature="jornada_terapeutica",
+                model=modelo_usado,
+                usage=message.usage,
+                student_id=student_id,
+                user_id=current_user.id,
+                escola_id=getattr(current_user, "escola_id", None),
+            )
+
+            response_text = message.content[0].text.strip()
+
+            # Limpar markdown
+            for marker in ["```json", "```"]:
+                response_text = response_text.replace(marker, "")
+            response_text = response_text.strip()
+
+            try:
+                analise_ia = json.loads(response_text)
+            except json.JSONDecodeError as e:
+                print(f"❌ Erro ao parsear JSON da IA: {e}")
+                analise_ia = {
+                    "erro": "Não foi possível estruturar a análise",
+                    "texto_bruto": response_text
                 }
-            ],
-        )
 
-        registrar_uso_ia(
-            feature="jornada_terapeutica",
-            model=modelo_usado,
-            usage=message.usage,
-            student_id=student_id,
-            user_id=current_user.id,
-            escola_id=getattr(current_user, "escola_id", None),
-        )
+            if not analise_ia.get("erro"):
+                save_cache(
+                    prompt_hash=prompt_hash,
+                    model=modelo_usado,
+                    response={"analise_ia": analise_ia},
+                    cache_type="jornada_terapeutica",
+                )
 
-        response_text = message.content[0].text.strip()
-        
-        # Limpar markdown
-        for marker in ["```json", "```"]:
-            response_text = response_text.replace(marker, "")
-        response_text = response_text.strip()
-        
-        try:
-            analise_ia = json.loads(response_text)
-        except json.JSONDecodeError as e:
-            print(f"❌ Erro ao parsear JSON da IA: {e}")
-            analise_ia = {
-                "erro": "Não foi possível estruturar a análise",
-                "texto_bruto": response_text
-            }
-        
-        print(f"✅ Análise consolidada gerada!")
+            print(f"✅ Análise consolidada gerada!")
         
         return {
             "student_name": student.name,

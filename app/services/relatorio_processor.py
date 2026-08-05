@@ -14,6 +14,11 @@ from app.database import SessionLocal
 from app.models.relatorio import Relatorio
 from app.services.websocket_manager import manager
 from app.core.config import settings
+from app.core.ai_usage import registrar_uso_ia
+
+# tokenmeter: atribuicao de consumo de IA (ver app/core/features.py)
+import tokenmeter as tm
+from app.core.features import F
 
 
 class RelatorioProcessorIncremental:
@@ -31,7 +36,9 @@ class RelatorioProcessorIncremental:
         pdf_path: Path,
         json_path: Path,
         content_type: str,
-        user_id: int
+        user_id: int,
+        student_id: int = None,
+        escola_id: int = None
     ):
         """
         Processa relatório em etapas, enviando atualizações via WebSocket
@@ -44,6 +51,13 @@ class RelatorioProcessorIncremental:
         5. Finalização (100%) - Salvar tudo
         """
         
+        # Contexto de atribuicao (student_id/user_id/escola_id) usado por
+        # _call_claude para registrar o consumo de tokens de cada uma das 4
+        # chamadas abaixo.
+        self._student_id = student_id
+        self._user_id = user_id
+        self._escola_id = escola_id
+
         try:
             # Ler arquivo
             with open(pdf_path, "rb") as f:
@@ -227,6 +241,7 @@ APENAS JSON, sem explicações."""
         )
         return self._parse_json(response)
     
+    @tm.feature(F.RELATORIO_UPLOAD)
     def _call_claude(self, file_base64, media_type, content_type, prompt):
         """Chama Claude de forma síncrona (para usar com asyncio.to_thread)"""
         message = self.client.messages.create(
@@ -249,6 +264,16 @@ APENAS JSON, sem explicações."""
                 }
             ],
         )
+
+        registrar_uso_ia(
+            feature="relatorio_upload",
+            model=self.modelo,
+            usage=message.usage,
+            student_id=getattr(self, "_student_id", None),
+            user_id=getattr(self, "_user_id", None),
+            escola_id=getattr(self, "_escola_id", None),
+        )
+
         return message.content[0].text.strip()
     
     def _parse_json(self, text):
@@ -331,7 +356,7 @@ async def processar_relatorio_com_progresso(
     - resumo_clinico (str)
     - recomendacoes (list), adaptacoes_sugeridas (dict)
     """
-    from anthropic import Anthropic
+    from app.core.anthropic_client import get_anthropic_client
     
     async def _notify(progress: int, message: str):
         if progress_callback:
@@ -360,8 +385,9 @@ async def processar_relatorio_com_progresso(
     
     await _notify(10, "Inicializando IA...")
     
-    # Cliente Anthropic
-    client = Anthropic(api_key=api_key)
+    # Cliente Anthropic (singleton instrumentado). O parametro `api_key` e mantido
+    # por compatibilidade de assinatura, mas a chave usada e a de settings.
+    client = get_anthropic_client()
     processor = RelatorioProcessorIncremental(client)
     media_type = processor._get_media_type(content_type)
     

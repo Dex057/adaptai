@@ -129,7 +129,21 @@ def obter_questoes(prova_aluno_id: int, current_student: Student = Depends(get_c
     return {
         "prova_aluno_id": prova_aluno_id,
         "status": prova_aluno.status.value,
-        "questoes": [{"id": q.id, "numero": q.numero, "enunciado": q.enunciado, "opcoes": q.opcoes, "resposta_ja_dada": respostas_dict.get(q.id)} for q in questoes]
+        "questoes": [
+            {
+                "id": q.id,
+                "numero": q.numero,
+                "enunciado": q.enunciado,
+                # TC-150/TC-152: 'tipo' nao vinha no payload, entao o frontend nao
+                # tinha como distinguir dissertativa (sem 'opcoes') de uma questao
+                # de multipla escolha ainda sem opcoes carregadas -> nenhum campo de
+                # resposta era renderizado para questoes dissertativas.
+                "tipo": q.tipo.value if hasattr(q.tipo, "value") else q.tipo,
+                "opcoes": q.opcoes,
+                "resposta_ja_dada": respostas_dict.get(q.id),
+            }
+            for q in questoes
+        ],
     }
 
 

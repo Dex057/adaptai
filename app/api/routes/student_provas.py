@@ -22,6 +22,46 @@ router = APIRouter(prefix="/student/provas", tags=["Student - Provas"])
 # Antes estava duplicado aqui. Mesma assinatura e comportamento.
 
 
+# TC-151: multiplicador padrao de tempo estendido para aluno com acomodacao.
+# 1.5x e a razao usada em avaliacoes brasileiras de larga escala (ENEM/SAEB) para
+# candidatos com atendimento especializado - serve de default seguro ate o produto
+# definir um valor por aluno.
+FATOR_TEMPO_ESTENDIDO_PADRAO = 1.5
+
+
+def calcular_tempo_efetivo(student: Student, tempo_limite_minutos):
+    """Aplica a acomodacao de tempo estendido do aluno sobre o limite da prova.
+
+    TC-151 ("Nao aparece tempo fazendo a prova", pre-condicao "Aluno com acomodacao"):
+    `Prova.tempo_limite_minutos` e unico por prova, igual para todos - nao havia, em
+    lugar nenhum do schema, um conceito de tempo adicional por aluno.
+
+    A acomodacao fica em `Student.profile_data` (coluna JSON que ja existe) em vez de
+    uma coluna dedicada: nao exige migration, e o campo e naturalmente esparso (poucos
+    alunos tem acomodacao). Duas formas aceitas, em ordem de precedencia:
+
+      {"tempo_estendido": true}          -> aplica o fator padrao (1.5x)
+      {"fator_tempo_estendido": 1.75}    -> fator explicito, tem prioridade
+
+    Retorna (tempo_estendido: bool, tempo_efetivo_minutos: int | None). Se a prova nao
+    tem limite de tempo, nao ha o que estender - devolve (False, None).
+    """
+    if not tempo_limite_minutos or tempo_limite_minutos <= 0:
+        return False, None
+
+    perfil = student.profile_data if isinstance(student.profile_data, dict) else {}
+
+    fator = perfil.get("fator_tempo_estendido")
+    if isinstance(fator, bool) or not isinstance(fator, (int, float)) or fator <= 1:
+        # Valor ausente/invalido/nao-ampliador: cai para o flag booleano.
+        fator = FATOR_TEMPO_ESTENDIDO_PADRAO if perfil.get("tempo_estendido") is True else 1
+
+    if fator <= 1:
+        return False, tempo_limite_minutos
+
+    return True, int(round(tempo_limite_minutos * fator))
+
+
 class ResponderRequest(BaseModel):
     """Schema para responder uma questao.
 
@@ -73,6 +113,12 @@ def obter_prova_detalhe(prova_aluno_id: int, current_student: Student = Depends(
 
     prova = db.query(Prova).filter(Prova.id == prova_aluno.prova_id).first()
 
+    # TC-151: mesma acomodacao exposta em /questoes, para a tela de detalhe poder
+    # avisar o aluno do tempo real antes de ele iniciar a prova.
+    tempo_estendido, tempo_efetivo = calcular_tempo_efetivo(
+        current_student, prova.tempo_limite_minutos
+    )
+
     return {
         "prova_aluno_id": prova_aluno.id,
         "prova_id": prova.id,
@@ -82,6 +128,8 @@ def obter_prova_detalhe(prova_aluno_id: int, current_student: Student = Depends(
         "serie_nivel": prova.serie_nivel,
         "quantidade_questoes": prova.quantidade_questoes,
         "tempo_limite_minutos": prova.tempo_limite_minutos,
+        "tempo_efetivo_minutos": tempo_efetivo,
+        "tempo_estendido": tempo_estendido,
         "pontuacao_total": prova.pontuacao_total,
         "nota_minima_aprovacao": prova.nota_minima_aprovacao,
         "status": prova_aluno.status.value,
@@ -125,10 +173,22 @@ def obter_questoes(prova_aluno_id: int, current_student: Student = Depends(get_c
     
     respostas_dadas = db.query(RespostaAluno).filter(RespostaAluno.prova_aluno_id == prova_aluno_id).all()
     respostas_dict = {r.questao_id: r.resposta_aluno for r in respostas_dadas}
-    
+
+    prova = db.query(Prova).filter(Prova.id == prova_aluno.prova_id).first()
+    tempo_estendido, tempo_efetivo = calcular_tempo_efetivo(
+        current_student, prova.tempo_limite_minutos if prova else None
+    )
+
     return {
         "prova_aluno_id": prova_aluno_id,
         "status": prova_aluno.status.value,
+        # TC-151: o frontend precisa dos tres para montar o cronometro regressivo -
+        # o tempo nominal da prova, o tempo ja com a acomodacao aplicada e o flag
+        # que permite sinalizar ao aluno que ele tem tempo estendido.
+        "tempo_limite_minutos": prova.tempo_limite_minutos if prova else None,
+        "tempo_efetivo_minutos": tempo_efetivo,
+        "tempo_estendido": tempo_estendido,
+        "data_inicio": prova_aluno.data_inicio,
         "questoes": [
             {
                 "id": q.id,

@@ -61,6 +61,11 @@ def coletar(store, *, dias: int = 30, service: str | None = None,
 
         resumo = q(f"""SELECT COUNT(*) AS chamadas, COALESCE(SUM(cost_usd),0) AS custo,
                        COALESCE(SUM(total_tokens),0) AS tokens,
+                       COALESCE(SUM(input_tokens),0) AS input_tokens,
+                       COALESCE(SUM(output_tokens),0) AS output_tokens,
+                       COALESCE(SUM(cache_read_tokens),0) AS cache_read,
+                       COALESCE(SUM(cache_write_tokens),0) AS cache_write,
+                       AVG(duration_ms) AS lat_media, MAX(duration_ms) AS lat_max,
                        COUNT(DISTINCT run_id) AS execucoes,
                        MIN(occurred_at) AS ini, MAX(occurred_at) AS fim
                        FROM {ev} e WHERE {W}""")[0]
@@ -95,10 +100,51 @@ def coletar(store, *, dias: int = 30, service: str | None = None,
         servicos = q(f"""SELECT e.service AS k, COUNT(*) AS chamadas,
                          COALESCE(SUM(e.cost_usd),0) AS custo
                          FROM {ev} e WHERE {W} GROUP BY e.service ORDER BY custo DESC""")
+        # Composição de tokens por feature: entrada, saída e cache são colunas
+        # distintas desde sempre (store.py). Somá-las num total esconde o que
+        # decide a ação — saída custa ~5x entrada.
+        tokens_feature = q(f"""SELECT e.feature AS k, COUNT(*) AS chamadas,
+                               COALESCE(SUM(e.input_tokens),0) AS input_tokens,
+                               COALESCE(SUM(e.output_tokens),0) AS output_tokens,
+                               COALESCE(SUM(e.cache_read_tokens),0) AS cache_read,
+                               COALESCE(SUM(e.cache_write_tokens),0) AS cache_write,
+                               COALESCE(SUM(e.cost_usd),0) AS custo
+                               FROM {ev} e WHERE {W} GROUP BY e.feature
+                               ORDER BY custo DESC""")
+        # AVG/MAX e não percentil: `PERCENTILE_CONT` não existe no SQLite e a lib
+        # se compromete com três bancos (store.py). Média + pior caso são
+        # portáteis e agregam no banco, sem trazer linha bruta para a memória.
+        latencia = q(f"""SELECT e.feature AS k, COUNT(e.duration_ms) AS n,
+                         AVG(e.duration_ms) AS media, MAX(e.duration_ms) AS maximo
+                         FROM {ev} e WHERE {W} AND e.duration_ms IS NOT NULL
+                         GROUP BY e.feature ORDER BY media DESC""")
+        # provider+model no group by: a tarifa de cache depende dos dois.
+        cache_modelo = q(f"""SELECT e.provider AS provider, e.model AS model,
+                             COALESCE(SUM(e.cache_read_tokens),0) AS cache_read,
+                             COALESCE(SUM(e.cache_write_tokens),0) AS cache_write,
+                             COALESCE(SUM(e.input_tokens),0) AS input_tokens
+                             FROM {ev} e WHERE {W} GROUP BY e.provider, e.model""")
+        # Chamada que falhou já queimou os tokens de entrada — o custo dela está
+        # hoje diluído no total, sem rótulo.
+        erros = q(f"""SELECT COALESCE(e.error_type,'(sem tipo)') AS k, COUNT(*) AS n,
+                      COALESCE(SUM(e.cost_usd),0) AS custo,
+                      COALESCE(SUM(e.total_tokens),0) AS tokens
+                      FROM {ev} e WHERE {W} AND e.status <> 'ok'
+                      GROUP BY e.error_type ORDER BY n DESC""")
+        # request_path vem do middleware HTTP, gravado em toda chamada. Corta o
+        # custo por rota da API, que não coincide com o corte por feature: a
+        # mesma feature é acionada por rotas diferentes.
+        por_rota = q(f"""SELECT t.tag_value AS k, COUNT(*) AS chamadas,
+                         COALESCE(SUM(e.cost_usd),0) AS custo
+                         FROM {ev} e JOIN {tg} t
+                           ON t.event_id = e.event_id AND t.tag_key = 'request_path'
+                         WHERE {W} GROUP BY t.tag_value ORDER BY custo DESC""")
     return {"dias": dias, "resumo": resumo, "por_dia": por_dia, "por_feature": por_feature,
             "por_modelo": por_modelo, "por_tenant": por_tenant, "cobertura": cobertura,
             "status": status, "sem_preco": sem_preco, "por_entidade": por_entidade,
-            "servicos": servicos, "tag_tenant": tag_tenant}
+            "servicos": servicos, "tag_tenant": tag_tenant,
+            "tokens_feature": tokens_feature, "latencia": latencia,
+            "cache_modelo": cache_modelo, "erros": erros, "por_rota": por_rota}
 
 
 def _topn(linhas: list[dict], n: int = MAX_SERIES) -> tuple[list[str], dict]:
@@ -112,6 +158,54 @@ def _topn(linhas: list[dict], n: int = MAX_SERIES) -> tuple[list[str], dict]:
 def _fmt(v: Decimal, casas: int = 2) -> str:
     s = f"{v:,.{casas}f}"
     return s.replace(",", "\x00").replace(".", ",").replace("\x00", ".")
+
+
+def _int(v) -> str:
+    """Inteiro com separador de milhar brasileiro."""
+    return f"{int(v or 0):,}".replace(",", ".")
+
+
+def _ms(v) -> str:
+    """Duração legível: abaixo de 1s em ms, acima em segundos."""
+    n = float(v or 0)
+    return f"{n:.0f} ms" if n < 1000 else _fmt(Decimal(str(n / 1000)), 1) + " s"
+
+
+def _economia_cache(cache_modelo: list[dict]) -> dict:
+    """Quanto o prompt caching poupou, contra ter pago entrada cheia.
+
+    A tarifa de leitura de cache é ~10% da de entrada (pricing.yaml), então o
+    desconto por token é `input_per_mtok - cache_read_per_mtok`.
+
+    ESTIMATIVA, não fatura: o painel agrega o período inteiro e resolve a tarifa
+    pelo instante de agora. A tabela tem faixas com validade — o Sonnet vira de
+    US$ 2/10 para US$ 3/15 em 01/09 —, então uma virada de preço dentro da janela
+    desloca o número. Serve para dimensionar ordem de grandeza.
+    """
+    lido = sum(int(r["cache_read"] or 0) for r in cache_modelo)
+    gravado = sum(int(r["cache_write"] or 0) for r in cache_modelo)
+    entrada = sum(int(r["input_tokens"] or 0) for r in cache_modelo)
+    base = {"lido": lido, "gravado": gravado, "entrada": entrada,
+            "economia": None, "em_uso": lido > 0 or gravado > 0}
+    # Denominador é todo token que entrou no modelo por um caminho ou outro.
+    base["taxa"] = (100.0 * lido / (lido + entrada)) if (lido + entrada) else 0.0
+    if not base["em_uso"]:
+        return base
+    try:
+        from .pricing import MTOK, PriceBook
+        pb = PriceBook()
+    except Exception:
+        return base                      # sem tabela de preço, mostra só os tokens
+    agora = dt.datetime.utcnow()
+    economia = Decimal(0)
+    for r in cache_modelo:
+        rate = pb.resolve(str(r["provider"]), str(r["model"]), agora)
+        if rate is None or rate.cache_read_per_mtok is None:
+            continue
+        desconto = rate.input_per_mtok - rate.cache_read_per_mtok
+        economia += Decimal(int(r["cache_read"] or 0)) * desconto / MTOK
+    base["economia"] = economia
+    return base
 
 
 def _fim_do_mes() -> str:
@@ -195,34 +289,63 @@ def _svg_area(por_dia, feats, cores, proj_por_dia: Decimal, dias_restantes: int)
     for i in sorted({0, n // 2, n - 1}):
         out.append(f'<text class="ax" x="{X(i) if n > 1 else (PL + 10 + 23):.1f}" '
                    f'y="{H-12}" text-anchor="middle">{dias[i][5:]}</text>')
-    # camada de hover
+    # camada de hover: a faixa acompanha o espaçamento real entre pontos. Com 12px
+    # fixos e uma janela de um ano os alvos se sobrepõem, e o dia sob o cursor
+    # deixa de ser o dia que o tooltip mostra.
+    passo = (W - PL - PR) / max(total_pts - 1, 1)
     for i, d in enumerate(dias):
         cx = X(i) if n > 1 else (PL + 10 + 23)
-        larg = 12 if n > 1 else 50
+        larg = min(12.0, max(passo, 1.5)) if n > 1 else 50
         out.append(f'<rect class="hit" x="{cx-larg/2:.1f}" y="{PT}" width="{larg}" '
                    f'height="{H-PT-PB}" data-t="{html.escape(d)} · US$ '
                    f'{_fmt(total_dia[i], 4)} acumulado"/>')
     return f'<svg viewBox="0 0 {W} {H}" class="chart" role="img">{"".join(out)}</svg>'
 
 
-def _svg_barras(linhas, cores=None, rotulo="", limite=8) -> str:
-    """Barras horizontais com rótulo direto — atende a regra de relevo do contraste."""
-    dados = [(str(r["k"]), _d(r["custo"]), int(r.get("chamadas") or 0))
-             for r in linhas[:limite]]
+def _svg_barras(linhas, cores=None, rotulo="", limite=8, *, chave="custo",
+                fmt=None, tt=None, vazio="Sem dados.") -> str:
+    """Barras horizontais com rótulo direto — atende a regra de relevo do contraste.
+
+    `chave`/`fmt` deixam a mesma barra servir custo (US$) e latência (ms). Para
+    grandeza que não é categórica — latência —, passe `cores=None`: a cor vira a
+    sequencial única, porque matiz por categoria ali sugeriria um agrupamento
+    que não existe.
+    """
+    fmt = fmt or (lambda v: f"US$ {_fmt(_d(v), 4)}")
+    tt = tt or (lambda r: f"{r['k']} · {int(r.get('chamadas') or 0)} chamada(s)")
+    dados = [(str(r["k"]), float(r[chave] or 0), tt(r)) for r in linhas[:limite]]
     if not dados:
-        return '<p class="vazio">Sem dados.</p>'
-    vmax = float(max(v for _, v, _ in dados)) or 1.0
+        return f'<p class="vazio">{html.escape(vazio)}</p>'
+    vmax = max(v for _, v, _ in dados) or 1.0
     linhas_html = []
-    for i, (k, v, c) in enumerate(dados):
-        pct = 100 * float(v) / vmax
+    for i, (k, v, dica) in enumerate(dados):
+        pct = 100 * v / vmax
         cor = (cores[i % len(cores)] if cores else "var(--seq)")
         linhas_html.append(
-            f'<div class="brow" data-t="{html.escape(k)} · {c} chamada(s)">'
+            f'<div class="brow" data-t="{html.escape(dica)}">'
             f'<span class="blabel" title="{html.escape(k)}">{html.escape(k)}</span>'
             f'<span class="btrack"><span class="bfill" style="width:{pct:.1f}%;'
             f'background:{cor}"></span></span>'
-            f'<span class="bval">US$ {_fmt(v, 4)}</span></div>')
+            f'<span class="bval">{html.escape(fmt(v))}</span></div>')
     return f'<div class="bars" aria-label="{html.escape(rotulo)}">{"".join(linhas_html)}</div>'
+
+
+def _stack(segmentos) -> str:
+    """Barra empilhada única, para composição de um todo. Rótulo percentual na
+    legenda: a fatia estreita não comporta texto dentro e some se depender dele."""
+    segs = [(r, int(v or 0), c) for r, v, c in segmentos if int(v or 0) > 0]
+    if not segs:
+        return '<p class="vazio">Sem tokens no período.</p>'
+    total = sum(v for _, v, _ in segs)
+    pct = lambda v: _fmt(Decimal(str(100 * v / total)), 1)      # noqa: E731
+    barra = "".join(
+        f'<span class="sseg" style="width:{100 * v / total:.2f}%;background:{c}" '
+        f'data-t="{html.escape(r)} · {_int(v)} tokens ({pct(v)}%)"></span>'
+        for r, v, c in segs)
+    leg = "".join(
+        f'<span class="lg"><i style="background:{c}"></i>{html.escape(r)} '
+        f'<b>{pct(v)}%</b></span>' for r, v, c in segs)
+    return f'<div class="stack">{barra}</div><div class="legend">{leg}</div>'
 
 
 def _tabela(linhas, colunas) -> str:
@@ -237,14 +360,25 @@ def _tabela(linhas, colunas) -> str:
     return f"<table><thead><tr>{th}</tr></thead><tbody>{''.join(tr)}</tbody></table>"
 
 
-def render(dados: dict, *, titulo: str = "Consumo de IA", orcamento: float | None = None) -> str:
+def _miolo(dados: dict, orcamento: float | None = None) -> str:
+    """Tiles e seções de UM período.
+
+    O shell — CSS, script, cabeçalho — fica em `render()`, porque é único; isto
+    aqui se repete uma vez por período no arquivo final. Separar os dois é o que
+    permite trocar de janela sem servidor: o HTML já traz todas as versões
+    prontas e o clique só decide qual fica visível.
+    """
     r = dados["resumo"]
     custo = _d(r["custo"])
     hoje = dt.date.today()
     dias_periodo = max(dados["dias"], 1)
     media_dia = custo / dias_periodo
     fim_mes = (hoje.replace(day=28) + dt.timedelta(days=4)).replace(day=1) - dt.timedelta(days=1)
-    restantes = max((fim_mes - hoje).days, 0)
+    # Projetar o fim do mês pela média de um período longo é enganoso: a média de
+    # 365 dias dilui crescimento e sazonalidade, e a tracejada sugeriria uma
+    # previsão que o número não sustenta. Acima de um mês o painel vira histórico.
+    projetar = dias_periodo <= 31
+    restantes = max((fim_mes - hoje).days, 0) if projetar else 0
 
     feats_top, outros = _topn(dados["por_feature"])
     feats = feats_top + (["Outros"] if outros else [])
@@ -265,29 +399,47 @@ def render(dados: dict, *, titulo: str = "Consumo de IA", orcamento: float | Non
                         f"custo NULL em: {m}"))
     else:
         alertas.append(("good", "Precificação", "todos os modelos precificados", ""))
-    erros = sum(int(x["n"]) for x in dados["status"] if str(x["k"]) != "ok")
-    alertas.append(("good" if erros == 0 else "critical", "Chamadas com erro",
-                    f"{erros} de {r['chamadas']}",
-                    "status error/partial" if erros else "nenhuma"))
+    n_erros = sum(int(x["n"]) for x in dados["status"] if str(x["k"]) != "ok")
+    custo_erro = sum(_d(x["custo"]) for x in dados["erros"])
+    tipos_erro = ", ".join(str(x["k"]) for x in dados["erros"][:2])
+    alertas.append(("good" if n_erros == 0 else "critical", "Chamadas com erro",
+                    f"{n_erros} de {r['chamadas']}",
+                    # Falha não sai de graça: a entrada já foi enviada e cobrada.
+                    f"US$ {_fmt(custo_erro, 4)} queimados · {tipos_erro}"
+                    if n_erros else "nenhuma"))
 
     ent = dados["por_entidade"]
     unidades = int(ent["unidades"] or 0)
     por_unidade = (_d(ent["custo"]) / unidades) if unidades else None
     execucoes = int(r["execucoes"] or 0)
     por_execucao = (custo / execucoes) if execucoes else None
+    chamadas = int(r["chamadas"] or 0)
+    # Fan-out: quantas chamadas de IA um único request dispara. Sai dos mesmos
+    # dois números que já alimentam o "custo por request".
+    fanout = (chamadas / execucoes) if execucoes else None
+    cache = _economia_cache(dados["cache_modelo"])
 
     def tiles():
-        t = [("Custo total", f"US$ {_fmt(custo, 2)}", f"{dados['dias']} dias"),
-             ("Média diária", f"US$ {_fmt(media_dia, 2)}", f"projeção do mês: US$ "
-              f"{_fmt(custo + media_dia * restantes, 2)}"),
-             ("Chamadas", f"{int(r['chamadas']):,}".replace(",", "."),
-              f"{int(r['tokens']):,}".replace(",", ".") + " tokens")]
+        t = [("Custo total", f"US$ {_fmt(custo, 2)}", _rotulo_periodo(dados["dias"])),
+             ("Média diária", f"US$ {_fmt(media_dia, 2)}",
+              f"projeção do mês: US$ {_fmt(custo + media_dia * restantes, 2)}"
+              if projetar else f"média dos {dados['dias']} dias"),
+             ("Chamadas", _int(chamadas), _int(r["tokens"]) + " tokens")]
         if por_execucao is not None:
             t.append(("Custo por request", f"US$ {_fmt(por_execucao, 4)}",
-                      f"{execucoes} execuç(ões)"))
+                      f"{execucoes} execuç(ões) · "
+                      f"{_fmt(Decimal(str(fanout)), 1)} chamada(s) cada"))
         if por_unidade is not None:
             t.append(("Custo por entidade", f"US$ {_fmt(por_unidade, 4)}",
                       f"{unidades} unidade(s) distintas"))
+        if r["lat_media"] is not None:
+            t.append(("Latência média", _ms(r["lat_media"]),
+                      f"pior caso: {_ms(r['lat_max'])}"))
+        if cache["em_uso"]:
+            eco = (f" · economia US$ {_fmt(cache['economia'], 4)}"
+                   if cache["economia"] is not None else " · sem tabela de preço")
+            t.append(("Cache de prompt", f"{cache['taxa']:.0f}%",
+                      f"da entrada{eco}"))
         if orcamento:
             pct = 100 * float(custo) / orcamento
             t.append(("Orçamento", f"{pct:.0f}%", f"de US$ {_fmt(Decimal(orcamento), 2)}"))
@@ -310,9 +462,13 @@ def render(dados: dict, *, titulo: str = "Consumo de IA", orcamento: float | Non
         sub_area = ("Um único dia com dado — sem série temporal ainda. A projeção "
                     "extrapola esse dia e vale pouco; ela fica confiável depois de "
                     "alguns dias.")
-    else:
+    elif projetar:
         sub_area = ("Empilhado. A linha tracejada projeta o fim do mês pela média "
                     f"diária dos {n_dias_com_dado} dias com dado.")
+    else:
+        sub_area = (f"Empilhado, {n_dias_com_dado} dias com dado. Sem projeção: "
+                    "numa janela desta largura a média diária esconde tendência "
+                    "demais para extrapolar.")
 
     tabela_feat = _tabela(
         [{"feature": x["k"], "chamadas": x["chamadas"], "custo": f"US$ {_fmt(_d(x['custo']),6)}"}
@@ -336,6 +492,161 @@ def render(dados: dict, *, titulo: str = "Consumo de IA", orcamento: float | Non
         servicos_html = f"""<section class="card"><h2>Por projeto</h2>
           <p class="sub">Cada aplicação que emite eventos para este banco.</p>
           {_svg_barras(dados['servicos'], SERIES_LIGHT, 'custo por projeto')}</section>"""
+
+    # ---- composição dos tokens -------------------------------------------
+    composicao = _stack([
+        ("Entrada", r["input_tokens"], SERIES_VAR[0]),
+        ("Saída", r["output_tokens"], SERIES_VAR[1]),
+        ("Cache lido", r["cache_read"], SERIES_VAR[2]),
+        ("Cache gravado", r["cache_write"], SERIES_VAR[3]),
+    ])
+    tabela_tok = _tabela(
+        [{"feature": x["k"], "entrada": _int(x["input_tokens"]),
+          "saida": _int(x["output_tokens"]), "cache": _int(x["cache_read"]),
+          "custo": f"US$ {_fmt(_d(x['custo']), 6)}"} for x in dados["tokens_feature"]],
+        [("feature", "Feature"), ("entrada", "Entrada"), ("saida", "Saída"),
+         ("cache", "Cache lido"), ("custo", "Custo")])
+
+    # ---- latência ---------------------------------------------------------
+    lat_html = _svg_barras(
+        dados["latencia"], None, "latência média por feature", chave="media",
+        fmt=lambda v: _ms(v),
+        tt=lambda x: (f"{x['k']} · média {_ms(x['media'])} · pior caso "
+                      f"{_ms(x['maximo'])} · {int(x['n'])} chamada(s)"),
+        vazio="Nenhuma chamada com duração registrada no período.")
+
+    # ---- cache ------------------------------------------------------------
+    if cache["em_uso"]:
+        cache_corpo = _svg_barras(
+            [x for x in dados["tokens_feature"] if int(x["cache_read"] or 0) > 0],
+            None, "tokens lidos do cache por feature", chave="cache_read",
+            fmt=lambda v: _int(v) + " tok",
+            tt=lambda x: (f"{x['k']} · {_int(x['cache_read'])} lidos do cache · "
+                          f"{_int(x['input_tokens'])} de entrada cheia"))
+        eco = (f"Economia estimada de <b>US$ {_fmt(cache['economia'], 4)}</b> contra "
+               f"pagar entrada cheia." if cache["economia"] is not None
+               else "Sem tabela de preço para estimar a economia.")
+        cache_sub = (f"{_int(cache['lido'])} tokens vieram do cache e "
+                     f"{_int(cache['entrada'])} de entrada cheia. {eco}")
+    else:
+        cache_corpo = ('<p class="vazio">Nenhum token de cache no período — '
+                       'todas as chamadas pagaram entrada cheia.</p>')
+        cache_sub = ("Prompt caching não está em uso. Os campos existem e são "
+                     "medidos; o que falta é a chamada declarar o trecho "
+                     "cacheável. Um cache do lado da aplicação, se houver, não "
+                     "aparece aqui — ele evita a chamada inteira, e o que não "
+                     "chega ao provedor não vira evento.")
+
+    # ---- rota -------------------------------------------------------------
+    rota_corpo = _svg_barras(
+        dados["por_rota"], SERIES_VAR + [OUTROS_VAR], "custo por rota",
+        vazio="Nenhum evento com a tag request_path.")
+    rota_sub = ("Corte por endpoint HTTP. Não coincide com o corte por feature: "
+                "a mesma feature costuma ser acionada por rotas diferentes."
+                if dados["por_rota"] else
+                "Depende da tag request_path, gravada por um escopo por request "
+                "no middleware HTTP da aplicação.")
+
+    # ---- erros ------------------------------------------------------------
+    erros_html = ""
+    if dados["erros"]:
+        tabela_err = _tabela(
+            [{"tipo": x["k"], "n": x["n"], "tokens": _int(x["tokens"]),
+              "custo": f"US$ {_fmt(_d(x['custo']), 6)}"} for x in dados["erros"]],
+            [("tipo", "Tipo de erro"), ("n", "Chamadas"), ("tokens", "Tokens"),
+             ("custo", "Custo queimado")])
+        erros_html = f"""<section class="card" style="margin-top:14px">
+          <h2>Desperdício</h2>
+          <p class="sub">Chamadas que falharam já haviam enviado — e pago — a
+          entrada. Este custo está incluído no total acima, sem rótulo próprio.</p>
+          {tabela_err}</section>"""
+
+    return f"""<div class="tiles">{tiles()}</div>
+
+<section class="card"><h2>Custo acumulado por feature</h2>
+<p class="sub">{html.escape(sub_area)}</p>
+{area}<div class="legend">{legenda}</div></section>
+
+<div class="grid2">
+<section class="card"><h2>Por feature</h2><p class="sub">Onde o dinheiro vai.</p>
+{_svg_barras(dados['por_feature'], SERIES_VAR + [OUTROS_VAR], 'custo por feature')}
+<details><summary>Ver como tabela</summary>{tabela_feat}</details></section>
+
+<section class="card"><h2>Por modelo</h2>
+<p class="sub">Nunca some tokens entre modelos — tokenizadores diferentes.</p>
+{_svg_barras(dados['por_modelo'], SERIES_VAR + [OUTROS_VAR], 'custo por modelo')}
+<details><summary>Ver como tabela</summary>{tabela_mod}</details></section>
+</div>
+
+<div class="grid2">
+<section class="card"><h2>Composição dos tokens</h2>
+<p class="sub">Saída custa múltiplas vezes a entrada — a proporção decide onde cortar.</p>
+{composicao}
+<details><summary>Ver como tabela</summary>{tabela_tok}</details></section>
+
+<section class="card"><h2>Latência por feature</h2>
+<p class="sub">Média por chamada. Passe o mouse para o pior caso.</p>
+{lat_html}</section>
+</div>
+
+<div class="grid2">
+<section class="card"><h2>Cache de prompt</h2>
+<p class="sub">{cache_sub}</p>
+{cache_corpo}</section>
+
+<section class="card"><h2>Por rota</h2>
+<p class="sub">{html.escape(rota_sub)}</p>
+{rota_corpo}</section>
+</div>
+
+<section class="card" style="margin-top:14px"><h2>Por {html.escape(dados['tag_tenant'])}</h2>
+<p class="sub">Dimensão livre de atribuição.</p>
+{_svg_barras(dados['por_tenant'], SERIES_VAR + [OUTROS_VAR], 'custo por tenant')}</section>
+
+{servicos_html}
+{erros_html}
+
+<h2 style="margin-top:24px">Saúde da medição</h2>
+<p class="sub">O painel também mede a si mesmo.</p>
+<div class="alerts">{alerta_html}</div>"""
+
+
+def _rotulo_periodo(dias: int) -> str:
+    """Nome curto do botão. Meses/anos aproximados: o corte real é sempre em dias."""
+    if dias % 365 == 0 and dias >= 365:
+        n = dias // 365
+        return "1 ano" if n == 1 else f"{n} anos"
+    if dias % 30 == 0 and dias >= 60:
+        return f"{dias // 30} meses"
+    if dias == 7:
+        return "7 dias"
+    return f"{dias} dias"
+
+
+def render(paineis: list[dict], *, titulo: str = "Consumo de IA",
+           orcamento: float | None = None, inicial: int | None = None) -> str:
+    """Documento completo. `paineis` é uma lista de saídas de `coletar()`, uma
+    por período; a barra de botões alterna entre elas sem nova consulta."""
+    paineis = sorted(paineis, key=lambda d: d["dias"])
+    if inicial is None or not any(d["dias"] == inicial for d in paineis):
+        inicial = paineis[0]["dias"] if paineis else 30
+
+    # Concatenação em vez de expressão com aspas escapadas dentro da f-string:
+    # backslash em expressão de f-string só é aceito a partir do 3.12, e esta lib
+    # roda embarcada em projetos que podem estar em runtime mais antigo.
+    def _marca(d, atributo):
+        return atributo if int(d["dias"]) == inicial else ""
+
+    botoes = "".join(
+        '<button type="button" class="pb" data-p="' + str(d["dias"]) + '" '
+        + _marca(d, 'aria-current="true"') + '>'
+        + html.escape(_rotulo_periodo(int(d["dias"]))) + "</button>"
+        for d in paineis)
+    corpos = "".join(
+        '<div class="periodo" data-p="' + str(d["dias"]) + '"'
+        + ("" if int(d["dias"]) == inicial else " hidden") + ">"
+        + _miolo(d, orcamento) + "</div>"
+        for d in paineis)
 
     gerado = dt.datetime.utcnow().strftime("%d/%m/%Y %H:%M UTC")
     return f"""<!DOCTYPE html>
@@ -379,6 +690,12 @@ stroke-width:3px;stroke-linejoin:round}}
 .lg{{display:flex;align-items:center;gap:6px}}
 .lg i{{width:10px;height:10px;border-radius:3px;display:inline-block}}
 .bars{{margin-top:6px}}
+/* Barra empilhada de composição: uma faixa só, segmentos proporcionais. Sem
+   rótulo dentro — a fatia estreita não comporta texto e o número sumiria. */
+.stack{{display:flex;height:22px;border-radius:6px;overflow:hidden;margin-top:12px;
+background:var(--grid)}}
+.sseg{{display:block;height:100%}} .sseg:hover{{filter:brightness(1.12)}}
+.legend b{{font-variant-numeric:tabular-nums;font-weight:600;color:var(--ink)}}
 .brow{{display:grid;grid-template-columns:150px 1fr 96px;gap:10px;align-items:center;padding:5px 0}}
 .blabel{{color:var(--ink2);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
 .btrack{{background:var(--grid);border-radius:4px;height:14px;overflow:hidden}}
@@ -399,38 +716,25 @@ th{{color:var(--ink2);font-weight:600}} td{{font-variant-numeric:tabular-nums}}
 .vazio{{color:var(--muted);padding:20px 0}}
 #tt{{position:fixed;pointer-events:none;background:var(--ink);color:var(--surface);
 padding:6px 9px;border-radius:6px;font-size:12px;opacity:0;transition:opacity .1s;z-index:9}}
+/* Seletor de período: botões, não <select>. São poucos e mutuamente exclusivos,
+   e o estado atual precisa ficar visível sem abrir nada. */
+.periodos{{display:flex;gap:6px;flex-wrap:wrap;margin:0 0 20px}}
+.pb{{background:var(--surface);color:var(--ink2);border:1px solid var(--border);
+border-radius:7px;padding:6px 13px;font:inherit;font-size:13px;cursor:pointer}}
+.pb:hover{{color:var(--ink);border-color:var(--axis)}}
+/* Selecionado marcado por peso + borda, nunca só por cor. */
+.pb[aria-current="true"]{{background:var(--ink);color:var(--plane);
+border-color:var(--ink);font-weight:600}}
+.pb:focus-visible{{outline:2px solid var(--seq);outline-offset:2px}}
 </style></head><body><div class="wrap">
 <button id="tema" type="button" aria-label="Alternar tema claro/escuro">tema</button>
 <h1>{html.escape(titulo)}</h1>
-<p class="sub">Consumo de IA nos últimos {dados['dias']} dias.</p>
+<p class="sub">Consumo de IA no período selecionado.</p>
 <p class="meta">Gerado em {gerado} · fonte: tabela de eventos do tokenmeter · valores em USD</p>
 
-<div class="tiles">{tiles()}</div>
+<div class="periodos" role="group" aria-label="Período">{botoes}</div>
 
-<section class="card"><h2>Custo acumulado por feature</h2>
-<p class="sub">{html.escape(sub_area)}</p>
-{area}<div class="legend">{legenda}</div></section>
-
-<div class="grid2">
-<section class="card"><h2>Por feature</h2><p class="sub">Onde o dinheiro vai.</p>
-{_svg_barras(dados['por_feature'], SERIES_VAR + [OUTROS_VAR], 'custo por feature')}
-<details><summary>Ver como tabela</summary>{tabela_feat}</details></section>
-
-<section class="card"><h2>Por modelo</h2>
-<p class="sub">Nunca some tokens entre modelos — tokenizadores diferentes.</p>
-{_svg_barras(dados['por_modelo'], SERIES_VAR + [OUTROS_VAR], 'custo por modelo')}
-<details><summary>Ver como tabela</summary>{tabela_mod}</details></section>
-</div>
-
-<section class="card" style="margin-top:14px"><h2>Por {html.escape(dados['tag_tenant'])}</h2>
-<p class="sub">Dimensão livre de atribuição.</p>
-{_svg_barras(dados['por_tenant'], SERIES_VAR + [OUTROS_VAR], 'custo por tenant')}</section>
-
-{servicos_html}
-
-<h2 style="margin-top:24px">Saúde da medição</h2>
-<p class="sub">O painel também mede a si mesmo.</p>
-<div class="alerts">{alerta_html}</div>
+{corpos}
 </div><div id="tt"></div>
 <script>
 document.getElementById('tema').addEventListener('click',()=>{{
@@ -444,14 +748,41 @@ document.addEventListener('mousemove',e=>{{if(tt.style.opacity==='1'){{
 tt.style.left=Math.min(e.clientX+14,innerWidth-tt.offsetWidth-8)+'px';
 tt.style.top=(e.clientY+16)+'px';}}}});
 document.addEventListener('mouseout',e=>{{if(e.target.closest('[data-t]'))tt.style.opacity=0;}});
+// Troca de período: todos os corpos já estão no documento; o clique só decide
+// qual fica visível. `hidden` em vez de display:none para o conteudo escondido
+// sair também da arvore de acessibilidade.
+document.querySelectorAll('.pb').forEach(b=>b.addEventListener('click',()=>{{
+const p=b.dataset.p;
+document.querySelectorAll('.pb').forEach(o=>
+  o.getAttribute('data-p')===p?o.setAttribute('aria-current','true')
+                              :o.removeAttribute('aria-current'));
+document.querySelectorAll('.periodo').forEach(s=>s.hidden=s.dataset.p!==p);
+location.hash='d'+p;}}));
+// Recupera o período do hash: recarregar a página (ou compartilhar o link do
+// arquivo) mantém a janela escolhida em vez de voltar ao padrão.
+const h=(location.hash.match(/^#d(\\d+)$/)||[])[1];
+if(h)document.querySelector('.pb[data-p="'+h+'"]')?.click();
 </script></body></html>"""
 
 
+# Janelas oferecidas por padrão. Semana, mês, trimestre, semestre e ano — todas
+# deslizantes a partir de hoje, como o resto do painel; nenhuma é mês-calendário.
+PERIODOS_PADRAO = (7, 30, 90, 180, 365)
+
+
 def gerar(store, caminho: str, **kw) -> str:
+    """Gera o arquivo. `periodos` define as janelas disponíveis no seletor e
+    `dias` qual delas abre selecionada."""
     titulo = kw.pop("titulo", "Consumo de IA")
     orcamento = kw.pop("orcamento", None)
-    dados = coletar(store, **kw)
+    periodos = kw.pop("periodos", None) or list(PERIODOS_PADRAO)
+    inicial = kw.pop("dias", 30)
+    # O período inicial sempre existe no seletor, mesmo se vier de fora da lista
+    # (`--days 45`): sem isto o botão marcado não teria corpo correspondente.
+    janelas = sorted(set(periodos) | {inicial})
+    paineis = [coletar(store, dias=d, **kw) for d in janelas]
     from pathlib import Path
-    Path(caminho).write_text(render(dados, titulo=titulo, orcamento=orcamento),
-                             encoding="utf-8")
+    Path(caminho).write_text(
+        render(paineis, titulo=titulo, orcamento=orcamento, inicial=inicial),
+        encoding="utf-8")
     return caminho

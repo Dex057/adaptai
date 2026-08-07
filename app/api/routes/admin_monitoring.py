@@ -3,15 +3,20 @@ Endpoints administrativos para monitoramento do sistema.
 
 Acesso restrito a ADMIN ou SUPER_ADMIN.
 """
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import HTMLResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
 from app.database import get_db
 from app.api.dependencies import require_admin
-from app.models.user import User
+from app.core.security import verify_password
+from app.models.user import User, UserRole
 from app.models.background_task import BackgroundTask, BackgroundTaskStatus
 from app.models.ai_usage_log import AIUsageLog
 from app.services.ai_cache_service import cache_stats, cleanup_old_cache
@@ -209,3 +214,132 @@ def obter_stats_uso_ia(
             for r in recentes
         ],
     }
+
+
+# ============================================================================
+# Painel HTML de consumo de IA
+# ============================================================================
+# Por que Basic Auth aqui, e nao o require_admin do resto do arquivo:
+# o projeto autentica por OAuth2 Bearer (dependencies.py:9), com o JWT indo no
+# header Authorization. Navegador nenhum envia esse header ao abrir uma URL
+# digitada, entao uma rota protegida por require_admin devolveria 401 para o
+# unico modo de uso que esta rota tem - ser aberta no navegador. Basic Auth e o
+# esquema que o navegador sabe negociar sozinho, e aqui ele valida contra o
+# MESMO usuario admin (email + hash bcrypt), sem criar credencial nova.
+#
+# A alternativa comum - token na query string - poe o JWT no historico do
+# navegador e nos logs de acesso do Railway. Nao compensa.
+
+_basic = HTTPBasic(realm="Painel de consumo de IA", auto_error=False)
+
+# Hash descartavel usado quando o e-mail nao existe: sem ele, a resposta para
+# usuario inexistente volta muito mais rapido que a de senha errada, e essa
+# diferenca de tempo enumera contas de admin.
+#
+# Precisa ser um hash bcrypt VALIDO. Com um valor malformado, o checkpw lanca,
+# verify_password captura e devolve False de imediato - o atalho reintroduz
+# justamente a diferenca de tempo que a constante existe para eliminar.
+# E o hash de uma string aleatoria descartada; nenhuma senha o satisfaz, e
+# ainda que satisfizesse, o `user is None` abaixo barra antes.
+_HASH_DUMMY = "$2b$12$/w/WSwTK71pAmv8XzCMzCue759mevaDv9HXUTGNNWtWTMkymAqqIu"
+
+# Cache em memoria do HTML gerado. Montar o painel dispara ~55 agregacoes (uma
+# por bloco, vezes os periodos do seletor); sem cache, cada F5 refaz tudo.
+# Por processo: com varios workers cada um tem o seu, o que so significa que o
+# primeiro acesso de cada worker paga a geracao.
+_PAINEL_TTL_S = 300
+_painel_cache: dict[tuple, tuple[float, str]] = {}
+_painel_lock = threading.Lock()
+
+
+def _admin_por_basic(credentials: HTTPBasicCredentials | None, db: Session) -> User:
+    """Valida Basic Auth contra um User ADMIN/SUPER_ADMIN ativo."""
+    naoautorizado = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Credenciais invalidas",
+        # Sem este header o navegador nao abre o dialogo de usuario/senha - ele
+        # so mostraria o corpo do erro.
+        headers={"WWW-Authenticate": 'Basic realm="Painel de consumo de IA"'},
+    )
+    if credentials is None:
+        raise naoautorizado
+
+    user = db.query(User).filter(User.email == credentials.username).first()
+    # verify_password roda sempre, inclusive sem usuario, para o tempo de
+    # resposta nao denunciar quais e-mails existem.
+    senha_ok = verify_password(
+        credentials.password, user.hashed_password if user else _HASH_DUMMY)
+    if user is None or not senha_ok:
+        raise naoautorizado
+    if not user.is_active:
+        raise naoautorizado
+    if user.role not in [UserRole.ADMIN, UserRole.SUPER_ADMIN]:
+        # 403 e nao 401: a credencial esta certa, o papel e que nao basta.
+        # Devolver 401 aqui faria o navegador pedir a senha de novo em loop.
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not enough permissions. Admin role required.",
+        )
+    return user
+
+
+@router.get("/ai-usage/painel", response_class=HTMLResponse)
+def obter_painel_uso_ia(
+    dias: int = 30,
+    orcamento: float = None,
+    tag_tenant: str = "tenant_id",
+    refresh: bool = False,
+    credentials: HTTPBasicCredentials = Depends(_basic),
+    db: Session = Depends(get_db),
+):
+    """
+    Painel HTML de consumo de IA (mesmo gerado pelo `tokenmeter panel`).
+
+    Abra no navegador: ele pede usuario e senha de um admin via Basic Auth.
+
+    - `dias`: janela que abre selecionada no seletor de periodo (default 30)
+    - `orcamento`: teto em USD, so para exibir o percentual consumido
+    - `tag_tenant`: qual tag corta a dimensao livre (default "tenant_id")
+    - `refresh=1`: ignora o cache de 5 minutos e regenera na hora
+    """
+    _admin_por_basic(credentials, db)
+
+    chave = (dias, orcamento, tag_tenant)
+    agora = time.monotonic()
+
+    if not refresh:
+        with _painel_lock:
+            item = _painel_cache.get(chave)
+        if item and (agora - item[0]) < _PAINEL_TTL_S:
+            # Header no proprio HTMLResponse, nao num `Response` injetado: ao
+            # devolver uma Response propria o FastAPI usa ela como resultado
+            # final, e os headers postos no objeto injetado se perdem.
+            # Idade em segundos ajuda a distinguir "o painel esta errado" de
+            # "o painel esta servindo o que gerou ha 4 minutos".
+            return HTMLResponse(item[1], headers={
+                "X-Painel-Cache": f"hit; age={int(agora - item[0])}s"})
+
+    try:
+        import tokenmeter as tm
+        from tokenmeter.panel import PERIODOS_PADRAO, coletar, render
+    except Exception:
+        raise HTTPException(status_code=503, detail="tokenmeter indisponivel")
+
+    try:
+        store = tm._require()
+    except Exception:
+        # O configure() do startup falha em silencio por desenho (main.py) - sem
+        # tokenmeter a aplicacao roda, so nao mede. Aqui a falha precisa aparecer.
+        raise HTTPException(
+            status_code=503,
+            detail="tokenmeter nao configurado - confira o log de startup",
+        )
+
+    janelas = sorted(set(PERIODOS_PADRAO) | {dias})
+    paineis = [coletar(store, dias=d, tag_tenant=tag_tenant) for d in janelas]
+    html = render(paineis, titulo="AdaptAI - consumo de IA",
+                  orcamento=orcamento, inicial=dias)
+
+    with _painel_lock:
+        _painel_cache[chave] = (agora, html)
+    return HTMLResponse(html, headers={"X-Painel-Cache": "miss"})

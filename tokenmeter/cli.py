@@ -73,7 +73,11 @@ def main(argv=None) -> int:
 
     pa = sub.add_parser("panel", help="painel HTML autocontido (abre no navegador, offline)")
     pa.add_argument("--dsn"); pa.add_argument("--prefix", default="")
-    pa.add_argument("--days", type=int, default=30, help="janela em dias (padrão 30)")
+    pa.add_argument("--days", type=int, default=30,
+                    help="janela que abre selecionada (padrão 30)")
+    pa.add_argument("--periodos", default=None,
+                    help="janelas do seletor, em dias, separadas por vírgula "
+                         "(padrão 7,30,90,180,365)")
     pa.add_argument("--service", default=None, help="filtra um projeto; padrão: todos")
     pa.add_argument("--environment", default=None, help="filtra o ambiente (ex.: production)")
     pa.add_argument("--tag-tenant", default="tenant_id",
@@ -224,9 +228,13 @@ def main(argv=None) -> int:
         from .panel import gerar
         tm.configure(_dsn(args), service="cli", table_prefix=args.prefix,
                      drain_on_start=False)
-        caminho = gerar(tm._require(), args.out, dias=args.days, service=args.service,
-                        environment=args.environment, tag_tenant=args.tag_tenant,
-                        titulo=args.title, orcamento=args.budget)
+        periodos = None
+        if args.periodos:
+            periodos = [int(x) for x in args.periodos.split(",") if x.strip()]
+        caminho = gerar(tm._require(), args.out, dias=args.days, periodos=periodos,
+                        service=args.service, environment=args.environment,
+                        tag_tenant=args.tag_tenant, titulo=args.title,
+                        orcamento=args.budget)
         print(f"tokenmeter: painel gerado -> {caminho}")
         print("abra no navegador. arquivo único, sem servidor, funciona offline.")
         return 0

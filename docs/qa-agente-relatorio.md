@@ -11,6 +11,90 @@ planilha (linha a linha), priorizando prioridade Alta + Falhou, depois Alta + Bl
 Media/Baixa. Cada TC abaixo foi investigado no codigo antes de qualquer edicao. Nao houve
 commit - alteracoes ficam no working tree para revisao do usuario.
 
+> **Nota (rodada de 06/08/2026):** este relatorio deixou de ser so-backend. A rodada
+> documentada em [Rodada 06/08/2026](#rodada-06082026---backend--frontend-em-conjunto) teve
+> acesso aos tres repositorios (backend `adaptai`, frontend `adaptai-frontend` e a branch
+> `fix/qa-correcoes-validadas`) e fechou boa parte dos TCs antes marcados como "fora do escopo
+> deste repositorio (frontend)".
+
+---
+
+## Plano de acompanhamento (rodada baseada na coluna "Observações da Revisão")
+
+Releitura da planilha (cópia) mostrou que a coluna `Observações da Revisão` foi editada desde a
+última leitura: a maior parte das notas antigas foi limpa, e um subconjunto de TCs recebeu
+anotações novas. Esta seção organiza esse subconjunto em planos de ação, por categoria.
+
+### 1. Marcado como corrigido, aguardando reteste
+
+**TC-017 — Criar aluno (validação), Alunos/Turma.** Nota na planilha: *"Corrigido - TESTAR em
+app/schemas/student.py (novo StudentCreate.grade_level: str = Field(..., min_length=1,
+max_length=50)...) e em app/api/routes/students.py:115 (removido o fallback or 'Não
+especificado')"*.
+- **Validado no repositório local (nesta rodada):** a correção segue presente e intacta —
+  `app/schemas/student.py:15` (`grade_level: str = Field(..., min_length=1, max_length=50, ...)`
+  em `StudentCreate`, sobrescrevendo o campo opcional de `StudentBase`) e
+  `app/api/routes/students.py:115` (`grade_level=student_data.grade_level`, sem fallback
+  `or "Não especificado"`). Nenhuma regressão identificada.
+- **Plano de seguimento:** reteste manual do TC-017 (tentar salvar aluno sem informar a série e
+  confirmar que a API responde 422 com o campo indicado) para virar `Passou` na planilha. Não
+  requer nova ação de código.
+
+### 2. Backend correto, correção pendente é no repositório do front-end
+
+A planilha pede explicitamente **"Liberar acesso ao repositório front-end para correção"** nos
+seguintes TCs - já investigados e confirmados nesta e em rodadas anteriores como comportamento
+correto no backend:
+- **TC-007** (Bloqueio de rota/aluno) - `app/api/dependencies.py` já retorna 401/403 com
+  `detail` claro; falta o frontend exibir um aviso antes do redirect.
+- **TC-058** (Gerar mensagem, Comunicação Família) - `POST /comunicacao/familia/mensagem` já
+  chama a IA corretamente; comportamento de "template" reportado é do app mobile, endpoint a
+  confirmar no frontend.
+- **TC-059** (Copiar/editar mensagem) - resposta da API já traz o texto completo; falta
+  clipboard/textarea editável no frontend.
+- **TC-121** (Baixar/exportar material) - backend não tem endpoint de exportação de PDF real
+  para este pipeline; a impressão via navegador é o único caminho hoje.
+- **Plano de seguimento:** este é um plano de acompanhamento fora do escopo deste repositório
+  (é 100% FastAPI/backend). Ação recomendada ao usuário: (a) conceder acesso ao repositório do
+  frontend a quem for corrigir esses 4 TCs, citando o TC correspondente em cada PR; (b) não é
+  necessária nenhuma mudança adicional de backend para nenhum dos quatro - as APIs já entregam
+  o que falta (status/detail no TC-007, texto gerado por IA no TC-058, texto completo no
+  TC-059). Único ponto realmente pendente de decisão de arquitetura é o TC-121 (exportação de
+  PDF real server-side), que é maior que uma correção de front-end simples.
+
+### 3. Causas raiz já documentadas, sem correção de código pendente (decisão de produto/arquitetura)
+
+Notas de revisão mantidas/atualizadas nesta rodada sem menção de "corrigido", confirmando
+causas raiz já eram gaps estruturais e não bugs pontuais (nenhuma ação de código nova aplicada,
+consistente com as entradas já existentes mais acima neste relatório por área): TC-006 (e-mail,
+RESEND_API_KEY ausente), TC-072 (SEDUC sem CRUD de escola), TC-075 (rota de frontend
+desalinhada com `/analytics/*`), TC-089/TC-166/TC-169 (leitor de tela/VLibras, 100% frontend),
+TC-090/TC-171 (Meu Perfil, sem endpoint de autoatendimento), TC-112 (qualidade de prompt de IA),
+TC-116 (roteiro de estudo ausente no gerador novo), TC-160 (sem endpoint de exportação em
+Analytics), TC-175 (sem campo de consentimento LGPD), TC-186 (mesmo gap do TC-006).
+- **Plano de seguimento:** nenhum código a alterar sem uma decisão de produto prévia (já
+  detalhado por TC nas seções de área abaixo). Sugiro ao usuário priorizar, entre esses, os que
+  têm maior prioridade na planilha para a próxima decisão: TC-090/TC-171 (Meu Perfil, 4 TCs
+  bloqueados por essa única lacuna) e TC-175 (LGPD, tema sensível/legal).
+
+### 4. Marcados "validar" (usuário pede confirmação/retest, não há nova causa raiz a levantar)
+
+**TC-118, TC-165, TC-184, TC-185** têm a nota "validar" (TC-185: "Validar causa") na coluna de
+revisão, sem detalhe adicional de causa raiz.
+- **TC-118** (Vários alunos de uma vez, Material Adaptado) - já coberto pelo cluster de Material
+  Adaptado (TC-027 etc.) documentado abaixo; "validar" aqui provavelmente significa "confirmar
+  se resolve junto com a ponte aluno↔material quando ela for implementada".
+- **TC-165** (Notificação push) - aprofundado nesta sessão: confirmado que não existe nenhuma
+  infraestrutura de push no backend (só WebSocket para progresso de laudo). "Validar" não muda a
+  conclusão: é feature ausente, requer decisão de produto/infra.
+- **TC-184, TC-185** (telas brancas) - aprofundado nesta sessão: sem exception handler custom no
+  backend que explique respostas inconsistentes; hipótese mais provável é exceção JS não tratada
+  no frontend, TC-185 especificamente ligado ao cluster de Material Adaptado.
+- **Plano de seguimento:** nenhuma mudança de código adicional recomendada agora. Ação sugerida:
+  confirmar com o usuário se "validar" significa "reproduzir de novo em ambiente de teste" -
+  nesse caso, o próximo passo é operacional (reteste guiado), não uma investigação de código
+  adicional, já esgotada nas rodadas anteriores para esses 4 TCs.
+
 ---
 
 ## Acesso/Login
@@ -173,6 +257,19 @@ do TC-027, primeiro da sequência).
   versão Mobile, no desktop não" ao criar meta de PEI) - se a criação de objetivo no desktop
   falha silenciosamente, o PEI pode nunca ganhar objetivos/nunca ser persistido corretamente.
   Não tentei corrigir às cegas porque, como material, isso tem múltiplas causas possíveis.
+- **Aprofundado (rodada seguinte):** revisado `PlanejamentoBNNCService.salvar_planejamento_como_pei`
+  (`app/services/planejamento_bncc_service.py:356-420`, chamado por
+  `POST /planejamento/salvar-planejamento`) - o PEI é criado corretamente com
+  `student_id=student_id` (vindo do `request.student_id`, validado via `verificar_acesso_aluno`
+  contra IDOR) e `status="rascunho"`, que já está coberto pelo filtro de `/meu-pei`. Não achei
+  nenhum caminho de código em que o `student_id` do PEI divirja do aluno logado, nem nenhum
+  ponto em que o `status` seja gravado fora de `["ativo","rascunho"]`. Isso reduz a probabilidade
+  da hipótese (a)/(b) e reforça a hipótese (c) como mais provável - a causa mais plausível
+  continua sendo o fluxo de criação de objetivo pelo desktop (TC-041/042) falhando
+  silenciosamente antes de chegar a este service. Mantido como **Requer decisão do
+  usuário/reprodução guiada** - não há edição de código segura a fazer sem reproduzir o passo a
+  passo exato do testador (idealmente logando no console do navegador durante a criação do
+  PEI/objetivo no desktop).
 
 ### TC-127 - Histórico de versões do PEI (Baixa, Bloqueado)
 - **Problema (planilha):** "não tem opção de ver anteriores".
@@ -445,6 +542,19 @@ do TC-027, primeiro da sequência).
   **Requer decisão do usuário / investigação adicional** (confirmar se "tempo estendido" já
   existe como conceito de produto em algum lugar do model `Student` antes de decidir onde
   encaixar).
+- **Aprofundado (rodada seguinte):** confirmado em `app/models/student.py` (1-62) que não existe
+  NENHUM campo relacionado a acomodação/tempo estendido (nem em `profile_data` JSON, que hoje só
+  documenta `learning_style`/`support_level`/`interests` como exemplo, sem um campo estruturado
+  para isso) e em `app/models/prova.py` que `Prova.tempo_limite_minutos` (linha 65) é único por
+  prova - **não existe, em lugar nenhum do schema, um conceito de "tempo adicional por aluno"**.
+  Por outro lado, `GET /student/provas/{id}` (`app/api/routes/student_provas.py:76-94`) já expõe
+  `tempo_limite_minutos` + `data_inicio`, o suficiente para o frontend montar um cronômetro
+  regressivo básico (isso cobriria a leitura mais literal do resultado esperado, "não aparece
+  tempo fazendo a prova", se for sobre exibir cronômetro e não sobre acomodação). Mantido como
+  **Requer decisão do usuário**: (1) se o problema é "nenhum cronômetro aparece", é gap de
+  frontend, dado já existe; (2) se é "tempo estendido por aluno" (o que a pré-condição do TC
+  sugere: "Aluno com acomodação"), é feature nova - decidir se o multiplicador fica em
+  `Student.profile_data` (JSON, sem migration) ou em coluna dedicada antes de qualquer código.
 
 ---
 
@@ -607,6 +717,20 @@ do TC-027, primeiro da sequência).
 - **Causa raiz:** Não investigado a fundo nesta rodada (baixa prioridade, ordem sequencial
   chegou ao fim do orçamento desta rodada de investigação).
 - **Ação tomada:** Não corrigido. **Requer investigação adicional em rodada futura.**
+- **Aprofundado (rodada seguinte):** confirmado via `grep` (`push|fcm|onesignal|web_push` em
+  `app/`) que o único mecanismo de "tempo real" do backend é
+  `app/services/websocket_manager.py` - um `ConnectionManager` usado exclusivamente para
+  notificar progresso de processamento de laudo/relatório (`notify_relatorio_progress`,
+  `send_progress`/`send_complete`/`send_error`, consumidos por `relatorios_v2.py`). Não existe
+  nenhum endpoint de assinatura de push (VAPID/Web Push API), nem integração com FCM/OneSignal/
+  APNs, nem tabela para guardar tokens de dispositivo. Ou seja, **notificação push é uma
+  feature 100% ausente**, não um bug de uma feature existente - bate com TC-187 (Notificação
+  in-app, "sininho") ter **Passou** enquanto TC-165 (push) falha: são mecanismos completamente
+  diferentes, e só o in-app existe.
+- **Ação tomada:** Não corrigido - **Requer decisão do usuário** (infraestrutura nova: escolher
+  provedor de push - Web Push nativo vs FCM/OneSignal -, desenhar armazenamento de
+  tokens/assinaturas por usuário, e implementar o disparo nos eventos relevantes). Não é uma
+  correção pontual e seria arquitetura de produto nova.
 
 ### TC-186 - E-mail de notificação (Baixa, Bloqueado)
 - **Problema (planilha):** "Não tem a opção de disparar email".
@@ -630,6 +754,22 @@ do TC-027, primeiro da sequência).
 - **Ação tomada:** Não corrigido. **Requer investigação adicional** (idealmente depois de
   decidida a arquitetura do cluster de Material Adaptado, já que TC-185 pode ser consequência
   direta dele).
+- **Aprofundado (rodada seguinte):** conferido `app/main.py` - o projeto **não registra nenhum
+  `@app.exception_handler`** customizado (só o `CORSMiddleware`), então qualquer exceção não
+  tratada dentro de uma rota já cai no handler padrão do FastAPI/Starlette, que retorna JSON
+  `{"detail": "Internal Server Error"}` com status 500 - um formato de erro consistente, não uma
+  resposta vazia/quebrada. Isso torna menos provável que o backend esteja devolvendo algo que
+  quebre o parser do frontend de forma genérica; reforça a hipótese de que a tela branca é uma
+  exceção JS não tratada (React) ao tentar renderizar um campo ausente/`null`, especialmente em
+  `GET /student/materiais/` no caso do TC-185 (rota que fica frequentemente vazia por causa do
+  cluster de Material Adaptado documentado acima - lista vazia/inconsistente é exatamente o tipo
+  de resposta que quebra renderizações que assumem `materiais[0]` etc. sem checar tamanho).
+- **Ação tomada:** Não corrigido - fora do escopo deste repositório (frontend), confirmado que
+  não há handler de exceção customizado a ajustar no backend para este TC. **Sugestão:**
+  adicionar um `@app.exception_handler(Exception)` global no backend só ajudaria a padronizar
+  o formato de erro (não resolve a tela branca em si, que é render-side); mais valioso é
+  priorizar resolver o cluster de Material Adaptado (TC-027 etc.), que pode eliminar o gatilho
+  mais provável do TC-185.
 
 ---
 
@@ -639,6 +779,18 @@ Por limite de tempo desta rodada, os seguintes TCs já têm ao menos uma entrada
 ou dentro de um cluster). Casos com investigação mais rasa (marcados "Requer investigação
 adicional" acima) e que devem ser priorizados na próxima rodada: TC-151, TC-165, TC-186,
 TC-184, TC-185, TC-034, TC-040, TC-107, TC-127.
+
+**Atualização (rodada de aprofundamento):** todos os 69 TCs Falhou/Bloqueado da planilha já têm
+entrada no relatório (confirmado por varredura automatizada TC a TC). TC-107, TC-186 e outros já
+citados no início desta rodada (TC-017, TC-111, TC-129, TC-141, TC-055, TC-144, TC-145, TC-150,
+TC-152, TC-006) não foram reabertos. Os que estavam marcados "Requer investigação adicional" -
+TC-151, TC-165, TC-184, TC-185, TC-034, TC-040 - foram aprofundados nesta rodada (ver seções
+"Aprofundado (rodada seguinte)" acima); TC-127 já tinha investigação conclusiva e não precisou de
+trabalho adicional. Nenhum bug de código novo, corrigível com segurança, foi encontrado nesse
+aprofundamento - todos continuam como feature ausente/decisão de produto (TC-151 tempo estendido,
+TC-165 push) ou fora do escopo deste repositório backend (TC-184/185 tela branca, provavelmente
+frontend; TC-034/040 aponta mais para o fluxo desktop de criação de objetivo de PEI, TC-041/042,
+do que para um bug isolado em `/meu-pei`).
 
 ---
 
@@ -704,3 +856,451 @@ TC-184, TC-185, TC-034, TC-040, TC-107, TC-127.
   de ativar/desativar já existem), TC-093 (conta de teste sem papel `SUPER_ADMIN`).
 - **Arquivos adicionais alterados:** `app/api/routes/students.py` (ordenação), `app/main.py`
   (warning de startup).
+
+### Rodada de aprofundamento (fechar gaps "Requer investigação adicional")
+
+- **Escopo:** varredura completa e automatizada dos 69 TCs Falhou/Bloqueado da planilha
+  confirmou que todos já tinham entrada no relatório. Os 7 explicitamente excluídos da
+  reinvestigação (TC-017, TC-111, TC-129, TC-141, TC-055/144/145, TC-150/152, TC-107, TC-006,
+  TC-186) não foram tocados. O trabalho desta rodada focou nos itens que a rodada anterior
+  havia marcado como investigação rasa/incompleta: **TC-151, TC-165, TC-184, TC-185, TC-034,
+  TC-040** (TC-127 já estava com investigação conclusiva, não precisou de trabalho adicional).
+- **Corrigidos nesta rodada (código alterado):** nenhum. Todos os 6 TCs aprofundados
+  confirmaram, com leitura de código adicional, que a causa é feature ausente (TC-151 tempo
+  estendido, TC-165 push notification), fora do escopo deste repositório backend (TC-184/185,
+  provável exceção não tratada no frontend em `GET /student/materiais/`), ou permanecem sem uma
+  causa única localizável no código investigado até agora (TC-034/040 - reforçada a hipótese de
+  que o problema está no fluxo de criação de objetivo do PEI pelo desktop, TC-041/042, e não em
+  `/meu-pei` em si).
+- **Requer decisão do usuário (sem código a alterar com segurança):** TC-151 (schema de
+  acomodação de tempo por aluno - onde armazenar: `profile_data` JSON vs coluna dedicada),
+  TC-165 (infraestrutura de push notification - provedor, armazenamento de tokens).
+- **Requer investigação adicional/reprodução guiada (não é decisão de arquitetura, é falta de
+  reprodução):** TC-034/040 (idealmente reproduzir criando um objetivo de PEI pelo desktop e
+  conferir se o POST realmente é enviado/persiste), TC-184/185 (idealmente com acesso ao
+  console do navegador durante o erro, já que o backend não tem handler de exceção custom que
+  explique uma resposta inconsistente).
+- **Nenhum arquivo de código foi alterado nesta rodada** - apenas `docs/qa-agente-relatorio.md`
+  foi atualizado com as investigações adicionais.
+
+---
+
+# Rodada 06/08/2026 - backend + frontend em conjunto
+
+Primeira rodada com acesso aos **tres** repositorios ao mesmo tempo:
+
+| Repositorio | Caminho | Papel nesta rodada |
+|---|---|---|
+| Backend | `adaptai` (branch `feature/contador-tokens-ia`) | correcoes aplicadas + testes novos |
+| Frontend oficial | `adaptai-frontend` (branch `main`) | base das correcoes novas (branch `fix/qa-rodada-2`) |
+| Frontend a11y | `adaptai-frontend-a11y` (branch `fix/qa-correcoes-validadas`) | **auditado, nao modificado** - pendente de merge pelo usuario |
+
+Isso destrava a categoria mais volumosa do relatorio: os TCs repetidamente marcados como
+"Backend correto, correcao pendente e no repositorio do front-end" e "fora do escopo deste
+repositorio (frontend)". A conclusao central e que **a maioria deles nao era feature ausente -
+era contrato desalinhado entre as duas pontas**.
+
+## 1. Auditoria da branch `fix/qa-correcoes-validadas` (nao modificada)
+
+A branch traz ~15 correcoes de QA que ainda **nao estao na `main`**. Cada uma foi conferida
+contra o codigo real do backend:
+
+**Validadas - batem com o backend atual:**
+- TC-003 (erro de login persistente ate o usuario corrigir os dados) - `Login.jsx`, `StudentLogin.jsx`
+- TC-017 (serie obrigatoria no formulario) - bate com `StudentCreate.grade_level` obrigatorio
+- TC-107 (ordenacao por nome) / TC-111 (transferir turma) - bate com `StudentUpdate.turma`, ja existente
+- TC-049 (filtro de laudos por aluno no servidor, com `size`) - `GET /relatorios/` aceita `student_id` e `size`
+- TC-077 (botao Atualizar no Painel SEDUC)
+- TC-098 (validacao de expiracao de JWT no cliente + confirmacao com `/auth/me`)
+- TC-114 (viewer generico legivel no lugar de JSON cru)
+- TC-129 (indicador de prazo vencido no PEI)
+- TC-133/135 (`Content-Type: undefined` nos uploads - deixa o axios gerar o boundary do multipart)
+- TC-150 (opcao "mista" removida do seletor: **nao existe** no enum `TipoQuestao` do backend -
+  era a origem do 422 "Erro ao criar prova")
+- TC-152 (textarea para questao dissertativa) - bate com o campo `tipo` ja exposto pelo backend
+- TC-166 (widget VLibras) / TC-075 (guarda contra shape incompleto em AlunoDesempenhoDetalhado)
+- TC-185 (Error Boundary nas rotas de materiais)
+
+**Dependiam de backend inexistente - resolvido nesta rodada (ver secao 2):**
+- `GET /student/materiais-adaptados/` e `/{id}` (TC-027/028): a branch ja consumia essas rotas,
+  que **nao existiam**. Como o consumo usa `Promise.allSettled`, a falha era silenciosa: a
+  secao "Materiais Adaptados para Voce" simplesmente nunca aparecia.
+- `tempo_efetivo_minutos` / `tempo_estendido` em `/student/provas/{id}/questoes` (TC-151): idem,
+  campos ainda inexistentes - o cronometro nunca era montado (`tempoEfetivoMin` ficava `null`).
+
+## 2. Correcoes aplicadas no backend (`adaptai`)
+
+### TC-027/028/031/032/033/081/088/118/123/124/125 - "material nao chega no aluno" - **CORRIGIDO**
+- **Causa raiz:** ja documentada acima (dois pipelines desconectados). O Portal do Aluno lia de
+  `materiais`/`materiais_alunos`; a tela "Criar com IA" grava em `materiais_adaptados_gerados`.
+- **Acao tomada:** novo modulo `app/api/routes/student_materiais_adaptados.py`, com
+  `GET /student/materiais-adaptados/` (lista) e `GET /student/materiais-adaptados/{id}` (detalhe
+  com `resultado_json`), registrado em `app/main.py`.
+- **Justificativa da opcao escolhida:** das tres hipoteses levantadas na rodada anterior,
+  esta e a de menor risco - **adiciona uma leitura, sem alterar contrato nenhum**.
+  `GET /student/materiais/` continua identico, nao ha migration, nao ha duplicacao de dado e
+  nao ha backfill (os materiais ja gerados aparecem imediatamente). A alternativa de copiar
+  `MaterialAdaptadoGerado` para `Material`/`MaterialAluno` duplicaria dado e exigiria migration.
+- **Seguranca:** o `student_id` vem do token, nunca de parametro - a rota nao tem superficie
+  para IDOR. Material de outro aluno responde **404** (nao 403), para nao vazar a existencia.
+- **Testes:** `tests/test_student_materiais_adaptados.py` (8 casos, incluindo isolamento entre
+  alunos e 401 sem token).
+
+### TC-151 - tempo estendido / cronometro na prova - **CORRIGIDO**
+- **Causa raiz:** `Prova.tempo_limite_minutos` e unico por prova; nao existia em lugar nenhum do
+  schema um conceito de tempo adicional por aluno (confirmado na rodada anterior).
+- **Acao tomada:** `calcular_tempo_efetivo()` em `app/api/routes/student_provas.py`, com os
+  campos `tempo_limite_minutos`, `tempo_efetivo_minutos`, `tempo_estendido` e `data_inicio`
+  expostos em `GET /student/provas/{id}/questoes` e `GET /student/provas/{id}`.
+- **Decisao de armazenamento** (o ponto que a rodada anterior deixou em aberto): a acomodacao
+  mora em `Student.profile_data` (coluna JSON **ja existente**), nao em coluna dedicada -
+  sem migration, e o campo e naturalmente esparso. Duas formas aceitas:
+  `{"tempo_estendido": true}` aplica o fator padrao 1.5x; `{"fator_tempo_estendido": 1.75}`
+  tem precedencia quando presente.
+- **Por que 1.5x:** e a razao usada em avaliacoes brasileiras de larga escala (ENEM/SAEB) para
+  candidatos com atendimento especializado - default defensavel ate o produto definir outro.
+- **Testes:** `tests/test_tempo_estendido.py` (13 casos). Cobrem explicitamente que um fator
+  invalido **nunca reduz** o tempo do aluno, e que `True` (que em Python vale 1) nao e
+  confundido com um fator numerico.
+
+## 3. Correcoes aplicadas no frontend (`adaptai-frontend`, branch `fix/qa-rodada-2`)
+
+### TC-184/TC-185/TC-055 - telas brancas - **CORRIGIDO (causa raiz encontrada)**
+Esta e a descoberta mais importante da rodada. A hipotese anterior ("excecao JS ao renderizar
+campo ausente") estava certa na forma, mas a causa e **unica e sistemica**:
+
+Quatro endpoints passaram a devolver `{items, meta}` (`app/core/pagination.py`) e o frontend
+continuou tratando a resposta como array. `data.map`/`data.length`/`data.reduce` lancam
+TypeError durante o render; o React desmonta a arvore inteira - **tela branca**.
+
+| Endpoint | Consumidor | Sintoma reportado |
+|---|---|---|
+| `GET /materiais/` | `MateriaisList.jsx` | TC-185 "unica tela que fica em branco e na aba de materiais" |
+| `GET /redacoes/temas` | `RedacoesPage.jsx` | TC-055 "os temas nao sao contabilizados e nao aparecem no final da pagina" |
+| `GET /materiais-adaptados/historico/student/{id}` | Dashboard, MateriaisAdaptados, MateriaisAdaptadosAluno | historico truncado (TC-118) |
+| `GET /relatorios/` | `RelatoriosList.jsx` | TC-049 (ja corrigido na branch a11y) |
+
+**Correcao importante ao registro anterior:** o relatorio dizia que a tela branca de materiais
+ja estava resolvida. **Nao esta na `main`** - o commit `369ddb0` que corrigia exatamente isso
+foi revertido por `59daea0`, e a `main` voltou a fazer `setMateriais(data)` com o objeto
+paginado. A correcao foi reaplicada nesta rodada.
+
+Em `RedacoesPage` o encadeamento era ainda mais enganoso: `setTemas(response.data)` gravava o
+**objeto** no estado e a linha seguinte (`response.data.reduce`) lancava, sendo engolida pelo
+`catch` - o erro no console apontava para o `reduce`, mas quem derrubava a tela era o `temas.map`
+do render, ja poluido.
+
+- **Acao tomada:** novo `src/utils/pagination.js` com `extrairLista()`/`extrairTotal()`, que
+  aceitam os tres formatos que a API pode devolver (array puro, `{items}`, chave legada) e
+  **nunca retornam `undefined`**. Aplicado em todos os consumidores acima.
+- **Bonus (TC-118):** as chamadas usavam `?limit=100`/`?offset=`, parametros que o backend
+  **ignora** (o contrato e `page`/`size`) - o historico vinha silenciosamente truncado em 20
+  itens. Trocado por `size`, com `SIZE_MAX = 100` (o teto que o `PaginationParams` aceita).
+- **Testes:** 14 asserts sobre os utilitarios (formato novo, chave legada, array puro,
+  precedencia de `items`, e entradas invalidas como `null`/string/`{detail: "Not Found"}`).
+
+### TC-007 - aviso de permissao antes do redirect - **CORRIGIDO**
+- **Causa raiz (lado frontend):** o backend ja mandava `detail` no 401/403, mas o interceptor
+  descartava e fazia `window.location.href = '/login'`. Como e navegacao de pagina inteira,
+  qualquer toast em memoria morre antes de ser lido.
+- **Acao tomada:** `src/utils/authAviso.js` com dois canais - `sessionStorage` para o aviso que
+  precisa **atravessar o redirect** (exibido pelo `Login.jsx`), e `CustomEvent` para o 403 com
+  sessao viva (faixa no `Layout.jsx`, sem tirar o usuario da tela). O 403 deixou de ser
+  silencioso: antes nao havia tratamento nenhum, so o 401 era interceptado.
+
+### TC-046 - humor/evolucao no Diario - **CORRIGIDO**
+`GET /diario-aprendizagem/estatisticas/student/{id}` ja devolvia `por_humor`,
+`por_nivel_compreensao` e `registros_por_semana`; a aba Estatisticas so renderizava
+total/tempo/media/disciplinas. Os tres dados agora tem visualizacao (barras de humor com
+percentual, chips de compreensao e grafico de evolucao por semana). As porcentagens sao
+calculadas sobre quem respondeu, nao sobre `total_registros` - humor e compreensao sao
+opcionais no registro.
+
+### TC-134 - resumo semanal (IA) - **CORRIGIDO**
+Feature 100% pronta no backend (`POST /diario-aprendizagem/resumo-semanal/gerar` e
+`GET .../student/{id}`) sem nenhuma entrada na interface - exatamente o "Opcao nao encontrada"
+do TC. Nova aba "Resumo Semanal (IA)" lista o historico ao abrir e gera **so por clique
+explicito**, para nao disparar custo de IA sem intencao.
+
+### TC-151 (frontend) - acomodacao no cadastro do aluno - **CORRIGIDO**
+Nova secao "Acomodacoes em Avaliacoes" no `StudentForm`, gravando em `profile_data`. O PUT
+preserva as demais chaves de `profile_data`, para que salvar o aluno aqui nao apague dados de
+outras telas. O cronometro que consome isso ja existe na branch `fix/qa-correcoes-validadas`.
+
+### TC-127 - historico do PEI - **CORRIGIDO (parcial)**
+Correcao ao registro anterior: a aba "Historico" **ja existia** e ja consumia
+`/planejamento/pei/{id}/historico`. O que faltava era que a tela descartava `valor_antigo` e
+`valor_novo` de cada ajuste - ou seja, o "ver anteriores" do TC estava na resposta e nao era
+exibido. Agora mostra `valor anterior -> valor novo` e o tipo do ajuste. Se "historico" no
+sentido do TC for snapshot completo versionado, isso continua sendo decisao de produto.
+
+### TC-059 - copiar/editar mensagem da familia - **NAO APLICAVEL a este repositorio**
+Varredura por `comunicacao`/`familia` em `adaptai-frontend/src` nao encontrou **nenhuma** tela
+de Comunicacao Familia - o que confirma a observacao do TC-058 ("apenas presente na versao
+mobile"). Nao ha o que corrigir aqui: construir a tela do zero seria feature nova, no
+repositorio errado. **Acao recomendada:** direcionar TC-058/TC-059 ao repositorio do app mobile.
+
+## 4. Validacao executada
+
+- **Backend:** `pytest tests/` - **106 passaram** (85 antes, +21 novos desta rodada).
+- **Frontend:** `npm run build` (vite) - sucesso, 2674 modulos, sem erro.
+- **Utilitarios de paginacao:** 14 asserts, todos passando.
+- **Lint do frontend:** nao executado na `main` - **nao existe arquivo de configuracao de
+  ESLint nesse branch**. O `.eslintrc.cjs` foi adicionado pela branch `fix/qa-correcoes-validadas`
+  (junto com `eslint-plugin-jsx-a11y`), entao o gate de lint so passa a existir apos o merge dela.
+
+## 5. Situacao dos TCs apos esta rodada
+
+**Corrigidos e prontos para reteste:** TC-007, TC-027, TC-028, TC-031, TC-032, TC-033, TC-046,
+TC-055, TC-081, TC-088, TC-118, TC-123, TC-124, TC-125, TC-127 (parcial), TC-134, TC-151,
+TC-184, TC-185.
+
+**Continuam exigindo decisao de produto (sem mudanca segura de codigo):**
+- TC-060/061/146/147/148 - CRUD de Plano de Aula (feature nova: model + migration + rotas)
+- TC-072/073/074 - CRUD do Painel SEDUC (o proprio codigo marca como v1/demonstracao)
+- TC-090/091/171/172 - Meu Perfil (ausente dos dois lados: sem menu e sem endpoint de autoatendimento)
+- TC-165 - push notification (infraestrutura inexistente: provedor, tokens de dispositivo)
+- TC-175/176 - LGPD (consentimento e portabilidade; implicacao juridica)
+- TC-160/121 - exportacao (Analytics e material adaptado): definir formato antes
+- TC-112/113/114 - qualidade do conteudo gerado por IA (ajuste de prompt, com custo)
+- TC-006/186 - `RESEND_API_KEY` precisa ser provisionada (nao ha correcao de codigo possivel)
+
+**Continuam exigindo reproducao guiada:** TC-034/040 (PEI nao aparece para o aluno - a hipotese
+mais forte segue sendo o fluxo de criacao de objetivo pelo desktop, TC-041/042).
+
+**Redirecionados para o repositorio mobile:** TC-058, TC-059.
+
+## 6. Onde esta o codigo
+
+| Repositorio | Branch | Estado |
+|---|---|---|
+| `adaptai` (backend) | `feature/contador-tokens-ia` (branch em que o repo ja estava) | alteracoes no working tree, sem commit |
+| `adaptai-frontend` | `fix/qa-rodada-2` (criada a partir de `main`) | alteracoes no working tree, sem commit |
+| `adaptai-frontend-a11y` | `fix/qa-correcoes-validadas` | **intacta** - auditada, nao modificada |
+
+As duas branches de frontend sao independentes e nao foram mescladas. Ha sobreposicao de arquivo
+(nao de linha, na maior parte) em `StudentForm.jsx`, `Login.jsx` e `PEIGerenciamento.jsx` -
+esperar conflito pequeno e resolvivel ao juntar as duas.
+
+---
+
+# Rodada 07/08/2026 - validacao SO-BACKEND (sem acesso ao frontend)
+
+**Escopo imposto pelo usuario:** analisar exclusivamente `adaptai` (backend FastAPI). O
+repositorio de frontend NAO foi aberto nesta rodada (instrucao do `CLAUDE.md` de checar os dois
+lados foi explicitamente suspensa). Objetivo: **validar**, nao implementar - conferir se o
+backend descrito nas rodadas anteriores realmente existe, esta registrado e serve o contrato
+esperado. Nenhum arquivo de codigo foi alterado.
+
+**Metodo de validacao (alem da leitura de codigo):**
+- `pytest tests/` -> **106 passaram** (nenhuma regressao das rodadas anteriores).
+- Enumeracao real das rotas via `app.main:app.routes` (nao so `grep`), para provar registro e
+  prefixo `/api/v1` em vez de assumir pelo arquivo existir.
+- Conferencia cruzada `app/core/config.py` x `.env.example` x uso real das settings.
+
+## 1. Confirmado OK e servindo (backend implementado, registrado, contrato coerente)
+
+| TC | Evidencia |
+|---|---|
+| TC-027/028/031/032/081/088 | `app/api/routes/student_materiais_adaptados.py:26,31,64`; registrado em `app/main.py:37,382`; rotas reais `/api/v1/student/materiais-adaptados/` e `/{material_id}`. Isolamento pelo token (`get_current_student`), material de outro aluno = 404. `tests/test_student_materiais_adaptados.py` passa. |
+| TC-151 | `app/api/routes/student_provas.py:32` (`calcular_tempo_efetivo`), campos `tempo_efetivo_minutos`/`tempo_estendido`/`data_inicio` expostos em `:122-142` e `:182-191`. Escrita da acomodacao viavel: `profile_data` esta em `StudentUpdate` (`app/schemas/student.py:35`) e o model tem a coluna JSON (`app/models/student.py:34`) - **sem migration necessaria**. `tests/test_tempo_estendido.py` passa. |
+| TC-017 | `app/schemas/student.py:15` (`grade_level` obrigatorio em `StudentCreate`) intacto. |
+| TC-107 | `app/api/routes/students.py:141-144,188-189` (`ordenar_por`/`direcao` com `Literal`). |
+| TC-111 | `app/schemas/student.py:32-33` (`turma`/`matricula` em `StudentUpdate`); coluna existe (`app/models/student.py:27-28`). |
+| TC-141 | `app/api/routes/relatorios_analise.py:20,218-219,263` (cache de IA via `_hash_prompt`/`lookup_cache`/`save_cache`, TTL 30 dias). |
+| TC-055/145 | `app/services/redacao_ai_service.py:354` (`max_tokens=6000`) e `:358-366` (strip de cercas markdown). |
+| TC-134 | `POST /api/v1/diario-aprendizagem/resumo-semanal/gerar` e `GET .../student/{id}` existem e estao registrados (`diario_aprendizagem.py:376,420`). |
+| TC-046 | `GET /api/v1/diario-aprendizagem/estatisticas/student/{id}` (`diario_aprendizagem.py:539`) + `/timeline/student/{id}` (`:652`). |
+| TC-006 (parcial) | Warning de startup presente (`app/main.py:88-92`). O envio em si continua dependendo de segredo (ver divergencia D1). |
+
+## 2. Divergencias concretas encontradas nesta rodada (novo)
+
+### D1 - `RESEND_API_KEY`, `EMAIL_FROM` e `FRONTEND_URL` ausentes do `.env.example` (TC-006, TC-186)
+As tres settings existem em `app/core/config.py:123,124,126` e sao lidas em runtime
+(`app/services/email_service.py:26,38`; `app/api/routes/auth.py:459`), mas **nenhuma das tres
+aparece em `.env.example`**. A sugestao da rodada anterior nao foi aplicada.
+
+Agravante ainda nao registrado: `FRONTEND_URL` tem default `http://localhost:5173`
+(`config.py:126`) e e usada para montar o link de redefinicao em
+`auth.py:459` (`f"{settings.FRONTEND_URL.rstrip('/')}/redefinir-senha?token={token}"`). Ou seja,
+**mesmo provisionando `RESEND_API_KEY`, o TC-006 continua falhando** se `FRONTEND_URL` nao for
+setada em producao: o e-mail chega com um link apontando para `localhost`. Nao ha nenhum warning
+de startup para esse caso (o warning de `main.py:88` cobre so a chave do Resend).
+
+### D2 - A ponte de material adaptado e SO-LEITURA (TC-033, TC-123, TC-124)
+A rodada anterior listou TC-033/123/124 como "corrigidos e prontos para reteste". **Nao estao.**
+`MaterialAdaptadoGerado` (`app/models/material_adaptado_gerado.py:11-38`) nao tem nenhuma coluna
+de interacao do aluno - nao existe `favorito`, `lido`/`data_primeira_visualizacao` nem
+`anotacoes_aluno`. Esses campos existem apenas em `MaterialAluno`
+(`app/models/material.py:73-80`), do pipeline antigo, e os unicos endpoints de interacao
+(`POST /student/materiais/{material_aluno_id}/favorito` e `/anotacoes`,
+`app/api/routes/student_materiais.py:123,148`) operam por `material_aluno_id`.
+
+Resultado pratico: com a ponte nova, o aluno **ve e abre** o material (TC-027/028/031/032 OK),
+mas **nao consegue favoritar (TC-033), marcar como lido (TC-123) nem anotar (TC-124)** - nao ha
+endpoint para isso nesse pipeline. Fechar esses tres exige migration (colunas novas em
+`materiais_adaptados_gerados` ou uma tabela de interacao) - **requer decisao do usuario**.
+
+### D3 - Nao existe conceito de "disponibilizar" material adaptado (TC-027)
+O resultado esperado do TC-027 diz "aparece na lista do aluno (**status disponivel**)". O
+pipeline antigo tem esse controle (`Material.status == DISPONIVEL` + `MaterialAluno`), o novo
+nao: `MaterialAdaptadoGerado` nao tem coluna `status`, entao a ponte expoe ao aluno **tudo** que
+o professor gerar, no instante em que gerar. Funcionalmente o TC passa; conceitualmente o
+professor perdeu o controle de curadoria (inclusive sobre rascunhos/tentativas descartadas).
+**Requer decisao de produto**, nao e bug de codigo.
+
+### D4 - `alembic/versions/` esta VAZIO e `docs/migrations.md` nao existe
+`app/main.py:62-66` pula `Base.metadata.create_all` em producao ("use Alembic para migrations"),
+mas `alembic/versions/` nao tem **nenhuma** migration (o proprio `alembic/README_ADOCAO.md`
+admite: "onde as migrations vao morar (vazia ainda)"). Consequencia: em producao, hoje, **nenhuma
+coluna ou tabela nova chega ao banco** - nem por `create_all` (desligado) nem por Alembic (sem
+versao). Os `migrations/*.sql` avulsos nao cobrem `materiais_adaptados_gerados` (grep por
+`CREATE TABLE` nos 6 arquivos nao retorna essa tabela).
+
+Isso **nao bloqueia** TC-027 nem TC-151 (ambos usam tabela/coluna preexistentes - foi uma boa
+decisao de projeto), mas bloqueia qualquer correcao futura que precise de schema novo, incluindo
+D2 (interacoes do aluno), TC-175 (consentimento LGPD) e TC-150 (tipo por questao).
+Alem disso, `app/main.py:61` referencia `docs/migrations.md`, arquivo que **nao existe** em
+`docs/`.
+
+### D5 - `analytics.py` usa ownership por criador, ignorando escola (TC-075, TC-076)
+`app/api/routes/analytics.py:24-27,225-228,` filtra por `Student.created_by_user_id ==
+current_user.id`, em vez do helper canonico `verificar_acesso_aluno`
+(`app/api/dependencies.py:185-225`), que respeita SUPER_ADMIN e ADMIN/COORDINATOR por
+`escola_id`. Efeito: um **admin ou coordenador** recebe 404/lista vazia nos analytics de alunos
+criados por professores da propria escola - compativel com o sintoma "tela branca / sem dado"
+do TC-075/TC-076 mesmo que o frontend chame o endpoint certo.
+
+### D6 - Nao existe endpoint de metricas agregadas de escola para ADMIN (TC-076)
+O TC-076 espera "metricas agregadas da escola". `GET /api/v1/analytics/dashboard`
+(`analytics.py:141-201`) e **por usuario** (todos os filtros sao `== current_user.id`), e
+`/api/v1/admin/*` (`admin_monitoring.py:29,42,58,110,117,286`, todos com `require_admin`) sao
+metricas de **infraestrutura** (cache de IA, background tasks, consumo de tokens), nao de escola.
+O unico agregado real e `/api/v1/seduc/visao-geral`, que e visao de rede. Conclusao revisada em
+relacao a rodada anterior: **TC-076 nao e so desalinhamento de rota de frontend - o endpoint que
+serviria o caso nao existe.**
+
+### D7 - TC-144 nao e servido pelo contrato atual (redacao curta)
+Resultado esperado: "Avisa que e curto / pede mais texto". O que o backend faz hoje:
+- `< 50 caracteres` -> `app/schemas/redacao.py:60` (`min_length=50`) gera **422 generico** do
+  Pydantic, sem mensagem de "escreva mais";
+- `>= 50 caracteres mas < 50 palavras` -> `app/services/redacao_ai_service.py:272-273` chama
+  `_redacao_anulada("Texto muito curto (menos de 50 palavras)")`, que retorna **200 com nota 0**
+  (`:406-414`) - a redacao e **anulada**, nao devolvida para o aluno complementar.
+
+Ou seja, o TC-055/145 (correcao funcionando) foi corrigido, mas o TC-144 especificamente tem
+semantica divergente do esperado. Correcao possivel e pequena (validar antes e responder 400 com
+mensagem propria), mas muda contrato de resposta - **nao aplicada nesta rodada** por ser rodada
+de validacao.
+
+### D8 - `prazo_vencido` existe em UM unico endpoint (TC-129)
+`grep -rn "prazo_vencido" app/` retorna exatamente uma ocorrencia:
+`app/api/routes/planejamento_bncc.py:257` (`GET /planejamento/pei/{pei_id}/completo`). Os demais
+endpoints que devolvem objetivos de PEI (`/planejamento/pei/{pei_id}/resumo`,
+`/planejamento/pei/aluno/{student_id}`, e `ObjetivoResumo` em
+`app/api/routes/student_pei.py:116-127`) **nao trazem o campo**. Se a tela do TC-129 consumir
+qualquer um desses, o indicador continua invisivel mesmo com a correcao aplicada.
+
+### D9 - `GET /student/meu-pei` responde 200 com corpo `null` (TC-034/TC-040, TC-184/TC-185)
+`app/api/routes/student_pei.py:59,73-74`: `response_model=Optional[PEIResumo]` e `return None`
+quando nao ha PEI. Um cliente que faca `pei.objetivos` sobre `null` lanca TypeError - exatamente
+o padrao de tela branca do TC-184/TC-185. O contrato mais defensivo seria 404 ou um objeto de
+estado vazio. Nao alterado (mudanca de contrato, **requer decisao do usuario**), mas e a hipotese
+mais concreta ja levantada para TC-034 do lado do backend.
+
+### D10 - `app/api/routes/exam.py` nao esta registrado
+O modulo declara `APIRouter(prefix="/exam")` (`exam.py:15`) mas nao e importado nem incluido em
+`app/main.py` - nenhuma rota `/api/v1/exam/*` existe no app em execucao (confirmado pela
+enumeracao de `app.routes`). Nao ha TC apontando para ele; registrado aqui so como codigo morto
+que confunde investigacao futura. **Fora do escopo direto** - nao remover sem confirmacao.
+
+## 3. Reconfirmado: backend ausente (feature nova, sem regressao)
+
+- **TC-090/091/171/172 (Meu Perfil):** so existe `GET /api/v1/auth/me` (`auth.py:181`). Nao ha
+  `PUT /auth/me`, troca de senha logado nem upload de foto de usuario (a rota
+  `/students/{id}/foto` e do ALUNO, `students.py:716`).
+- **TC-072/073/074 (SEDUC):** `seduc.py` expoe **apenas** `/seduc/visao-geral` e `/seduc/escolas`
+  (`:62,185`), ambos GET. Sem CRUD de escola, sem turmas, sem vinculo professor/coordenador.
+- **TC-060/061/146/147/148 (Plano de Aula):** unica rota e `POST /api/v1/plano-aula/gerar`
+  (`plano_aula.py:15`), stateless, rate limit 20/h (`:26-29`) - o 429 do TC-061 e esperado; o 404
+  e chamada a rota inexistente. Sem model, sem persistencia, sem editar/exportar/duplicar.
+- **TC-116 (Roteiro de estudo):** ausente de `TIPOS_MATERIAIS`
+  (`materiais_adaptados.py:33-86`) **e** sem metodo gerador correspondente em
+  `app/services/ai_materiais_service.py` (grep por `roteiro` so acha HQ/tirinha e experimento).
+  Confirma que **nao e** uma linha de dicionario: exige prompt novo (custo de IA).
+- **TC-118 (varios alunos de uma vez):** `MaterialRequest.student_id: int`
+  (`materiais_adaptados.py:25`) e singular - o backend nao aceita lote. Falso na sinalizacao
+  anterior de "resolve junto com a ponte": a ponte resolveu a entrega, nao a geracao em lote.
+- **TC-121/142/143/147/160 (exportar PDF/planilha):** **nao existe nenhum endpoint que GERE
+  PDF** em todo o backend - as unicas ocorrencias de `application/pdf` sao validacao de
+  **upload** (`pei.py:60,171`, `relatorios.py:103,528,708`). Toda exportacao hoje e client-side.
+- **TC-150/152 (dissertativas):** `Prova.tipo_questao` (`app/models/prova.py:61`) e um enum unico
+  por prova e todas as questoes herdam dele (`provas.py:161`); `TipoQuestao` nao tem valor
+  "mista" (`prova.py:27-32`). Prova de tipos misturados e impossivel no modelo atual. Alem disso,
+  em `student_provas.py:235-241` a dissertativa e gravada com `esta_correta=None` e
+  `pontuacao_obtida=0` e **nada** corrige depois - uma prova 100% dissertativa sempre fecha com
+  nota 0/reprovado (`finalizar`, `:307-313`). TC-152 continua **nao atendido** para discursivas.
+- **TC-165 (push), TC-175/176 (LGPD):** sem infraestrutura de push e sem nenhum campo/endpoint de
+  consentimento ou portabilidade (grep por `consent`/`notificac` em `app/models` e
+  `app/api/routes` nao retorna nada de aluno). Notar que TC-187 ("notificacao in-app", marcado
+  Passou) tambem **nao tem backend** - o sininho e inteiramente frontend.
+
+## 4. Descartados nesta rodada por serem puramente frontend/UI
+
+TC-059 (copiar/editar texto - clipboard/textarea), TC-077 (botao Atualizar), TC-089 e TC-169
+(leitor de tela / texto alternativo), TC-166 (widget VLibras). Listados sem investigacao de
+codigo, conforme instrucao do escopo.
+
+## 5. Conclusao da rodada
+
+Nenhum arquivo de codigo foi alterado (rodada de validacao). Nenhuma regressao encontrada: todas
+as correcoes das rodadas anteriores continuam no lugar e os 106 testes passam. As duas
+divergencias que mais mudam o quadro anterior sao **D2** (TC-033/123/124 estavam marcados como
+corrigidos e nao estao) e **D4** (sem migration versionada, qualquer correcao futura que precise
+de schema nao chega a producao).
+
+---
+
+# Rodada 07/08/2026 (b) - implementacao das divergencias validadas
+
+Escopo: so backend, sem consultar o repositorio de frontend. Cada achado da rodada de
+validacao anterior foi reconferido no codigo antes de virar codigo novo. O item de
+variaveis de ambiente (TC-006/186, D5) ficou **deliberadamente de fora** a pedido do
+usuario. O detalhamento do que muda em producao esta em
+`docs/deploy-rodada-implementacao.md`.
+
+Suite: **122 testes passam** (eram 106; 16 novos). Nenhuma regressao.
+
+## Confirmado e corrigido
+
+| # | TC | Divergencia confirmada | Correcao |
+|---|---|---|---|
+| D2 | 033/123/124 | ponte era so leitura; sem coluna para favorito/lido/anotacao | migration `007`, 4 colunas em `materiais_adaptados_gerados` + 3 endpoints POST |
+| D1 | 152 | prova 100% discursiva fechava nota 0 e nada corrigia depois | denominador so com o ja corrigido; `POST /provas/aluno/{id}/corrigir-questao` |
+| D3 | 075 | `analytics.py` usava regra de professor para todo mundo | 3 endpoints migrados para `verificar_acesso_aluno` |
+| D9 | 034/040 | `GET /student/meu-pei` respondia 200 com corpo `null` | resposta sempre objeto, com `tem_pei: false` |
+| D6 | 144 | texto entre 50 chars e 50 palavras era anulado com nota 0 | 400 legivel antes de persistir e antes de gastar IA |
+| D8 | 129 | `prazo_vencido` existia em um unico endpoint | regra centralizada em `app/utils/pei_prazos.py`, aplicada em 4 lugares |
+| — | 150 (parcial) | `provas.py` gravava o tipo da PROVA em toda questao | passa a gravar o tipo que a questao tem, com fallback validado |
+
+## Achado novo desta rodada (nao estava na planilha)
+
+`app/api/routes/provas.py:515` tinha a mesma falha que `student_provas.py` ja havia
+corrigido: `questao.resposta_correta.strip()` com `resposta_correta = None` (dissertativa)
+levanta AttributeError e derruba `POST /provas/corrigir` inteiro em 500. Corrigido junto
+com o TC-152, porque e a mesma causa.
+
+## Confirmado e NAO implementado (com motivo)
+
+- **TC-118 (geracao em lote):** exige N chamadas de IA por requisicao - decisao de
+  produto com custo direto. `MaterialRequest.student_id` segue singular.
+- **TC-150 (prova mista de verdade):** o prompt em `prova_ai_service.py:159` fixa um unico
+  `tipo` para todas as questoes. Mudar isso e mudar prompt de IA, o que o CLAUDE.md exige
+  validar antes. A metade segura (persistir o tipo real de cada questao) foi feita.
+- **TC-076 (metricas agregadas de escola):** endpoint inexistente, nao divergencia. Sem o
+  enunciado exato das metricas esperadas, implementar seria inventar contrato.
+- **TC-006/186 (env vars):** adiado a pedido do usuario.
+- **D4 (`alembic/versions/` vazio):** segue vazio. A migration `007` foi escrita no padrao
+  `.sql` que o projeto ja usa (`migrations/00X_*.sql`), aplicada a mao. **Esta e a
+  dependencia critica do TC-033/123/124 em producao.**
+- **D10 (`exam.py` codigo morto):** nao removido - continua fora do escopo, sem TC.

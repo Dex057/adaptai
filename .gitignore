@@ -94,6 +94,10 @@ tm-deadletter.jsonl
 tokenmeter/extrato-local.csv
 tokenmeter/painel-local.html
 
+# Saida do "tokenmeter panel" rodado contra o banco de producao (dados reais
+# de custo por tenant/usuario). Gerada localmente, nunca deve ir para o repo.
+painel.html
+
 # A PASTA tokenmeter/ NA RAIZ *DEVE* IR PARA O GIT - e o codigo da biblioteca,
 # nao artefato. Idem app/core/features.py. Esta nota existe so para ninguem
 # adicionar 'tokenmeter/' aqui por engano no futuro.

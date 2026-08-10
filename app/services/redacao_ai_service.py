@@ -268,7 +268,11 @@ IMPORTANTE:
         quantidade_linhas = len([l for l in linhas if l.strip()])
         quantidade_palavras = len(texto_redacao.split())
         
-        # Verificar se está muito curta
+        # Verificar se está muito curta.
+        # TC-144: quem barra o texto curto e POST /redacoes/corrigir, ANTES de
+        # persistir e de gastar tokens, com um 400 explicando quantas palavras
+        # faltam. Este piso continua aqui como ultima linha de defesa para
+        # chamadas diretas ao servico - se cair aqui, ja e caso de anulacao.
         if quantidade_palavras < 50:
             return self._redacao_anulada("Texto muito curto (menos de 50 palavras)")
         

@@ -57,7 +57,12 @@ class SubmeterRedacaoRequest(BaseModel):
     """Submeter redação para correção"""
     redacao_id: int
     titulo_redacao: Optional[str] = Field(None, max_length=200)
-    texto: str = Field(..., min_length=50, description="Mínimo 50 caracteres")
+    # TC-144: o minimo real de uma redacao ENEM se mede em PALAVRAS, nao em
+    # caracteres, e quem valida isso e a rota (POST /redacoes/corrigir) - de la
+    # sai um 400 com mensagem legivel dizendo quantas palavras faltam. O
+    # `min_length=50` que existia aqui devolvia 422 com `detail` em formato de
+    # array de objetos, que o aluno via como "[object Object]".
+    texto: str = Field(..., min_length=1)
 
 
 # ========================================

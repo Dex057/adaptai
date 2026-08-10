@@ -19,6 +19,7 @@ from app.api.dependencies import (
 )
 from app.core.rate_limit import check_rate_limit
 from app.core.logging_config import get_logger
+from app.utils.pei_prazos import prazo_vencido, contar_vencidos
 from app.models.user import User
 from app.models.student import Student
 
@@ -164,7 +165,10 @@ async def listar_peis_aluno_v2(
         total_objetivos = len(pei.objetivos) if pei.objetivos else 0
         atingidos = sum(1 for o in pei.objetivos if o.status == "atingido") if pei.objetivos else 0
         em_progresso = sum(1 for o in pei.objetivos if o.status == "em_progresso") if pei.objetivos else 0
-        
+        # TC-129: na listagem, o professor precisa ver qual PEI tem meta atrasada
+        # sem abrir um por um.
+        vencidos = contar_vencidos(pei.objetivos) if pei.objetivos else 0
+
         resultado.append({
             "id": pei.id,
             "student_id": pei.student_id,
@@ -178,7 +182,8 @@ async def listar_peis_aluno_v2(
                 "total_objetivos": total_objetivos,
                 "atingidos": atingidos,
                 "em_progresso": em_progresso,
-                "nao_iniciados": total_objetivos - atingidos - em_progresso
+                "nao_iniciados": total_objetivos - atingidos - em_progresso,
+                "prazos_vencidos": vencidos
             }
         })
     
@@ -231,14 +236,11 @@ async def obter_pei_completo(
         return []
 
     # TC-129: nada no backend calculava/expunha se o prazo de uma meta ja passou.
-    hoje = datetime.now(timezone.utc).date()
-
+    # A regra vive em app/utils/pei_prazos.py - o resumo do PEI, a listagem por
+    # aluno e o Portal do Aluno usam exatamente a mesma funcao.
     for obj in pei.objetivos:
         trimestre = obj.trimestre or 1
-        # Vencida = tem prazo, o prazo ja passou e a meta ainda nao foi atingida.
-        atrasado = bool(
-            obj.prazo and obj.prazo < hoje and obj.status != "atingido"
-        )
+        atrasado = prazo_vencido(obj.prazo, obj.status)
         objetivos_por_trimestre[trimestre].append({
             "id": obj.id,
             "area": obj.area,
@@ -1081,7 +1083,10 @@ async def obter_resumo_pei(
     atingidos = sum(1 for o in pei.objetivos if o.status == "atingido")
     em_progresso = sum(1 for o in pei.objetivos if o.status == "em_progresso")
     nao_iniciados = sum(1 for o in pei.objetivos if o.status == "nao_iniciado")
-    
+    # TC-129: o resumo e a tela que o professor abre para saber onde agir -
+    # "quantas metas ja estouraram o prazo" e a informacao que faltava aqui.
+    vencidos = contar_vencidos(pei.objetivos)
+
     # Progresso médio
     progresso_medio = 0
     if total_objetivos > 0:
@@ -1094,10 +1099,12 @@ async def obter_resumo_pei(
     for obj in pei.objetivos:
         area = obj.area or "outro"
         if area not in por_area:
-            por_area[area] = {"total": 0, "atingidos": 0, "progresso_medio": 0}
+            por_area[area] = {"total": 0, "atingidos": 0, "vencidos": 0, "progresso_medio": 0}
         por_area[area]["total"] += 1
         if obj.status == "atingido":
             por_area[area]["atingidos"] += 1
+        if prazo_vencido(obj.prazo, obj.status):
+            por_area[area]["vencidos"] += 1
         por_area[area]["progresso_medio"] += float(obj.valor_atual or 0)
     
     # Calcular média por área
@@ -1110,11 +1117,13 @@ async def obter_resumo_pei(
     for obj in pei.objetivos:
         tri = obj.trimestre or 1
         if tri not in por_trimestre:
-            por_trimestre[tri] = {"total": 0, "atingidos": 0}
+            por_trimestre[tri] = {"total": 0, "atingidos": 0, "vencidos": 0}
         por_trimestre[tri]["total"] += 1
         if obj.status == "atingido":
             por_trimestre[tri]["atingidos"] += 1
-    
+        if prazo_vencido(obj.prazo, obj.status):
+            por_trimestre[tri]["vencidos"] += 1
+
     return {
         "pei_id": pei_id,
         "status": pei.status,
@@ -1124,6 +1133,7 @@ async def obter_resumo_pei(
             "atingidos": atingidos,
             "em_progresso": em_progresso,
             "nao_iniciados": nao_iniciados,
+            "prazos_vencidos": vencidos,
             "progresso_medio": round(progresso_medio, 1),
             "percentual_conclusao": round((atingidos / total_objetivos * 100) if total_objetivos > 0 else 0, 1)
         },

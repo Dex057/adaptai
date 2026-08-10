@@ -13,12 +13,13 @@ from app.database import get_db, SessionLocal
 from app.models.user import User
 from app.models.student import Student
 from app.models.prova import (
-    Prova, 
-    QuestaoGerada, 
-    ProvaAluno, 
+    Prova,
+    QuestaoGerada,
+    ProvaAluno,
     RespostaAluno,
     StatusProva,
-    StatusProvaAluno
+    StatusProvaAluno,
+    TipoQuestao
 )
 from app.schemas.prova import (
     ProvaCreate,
@@ -34,6 +35,8 @@ from app.schemas.prova import (
     RespostaAlunoCreate,
     RespostaAlunoResponse,
     CorrigirProvaResponse,
+    CorrigirQuestaoRequest,
+    CorrigirQuestaoResponse,
     ProvaParaAluno,
     QuestaoParaAluno
 )
@@ -42,6 +45,22 @@ from app.api.dependencies import get_current_user, oauth2_scheme, get_user_from_
 from app.core.tenant import enforce_limite_provas
 
 router = APIRouter(prefix="/provas")
+
+
+def _tipo_questao_valido(valor, padrao: TipoQuestao) -> TipoQuestao:
+    """
+    TC-150: converte o `tipo` que veio da IA em TipoQuestao, caindo no tipo da
+    prova quando o valor nao existe no enum. Sem isso, um rotulo inventado pela
+    IA viraria erro de gravacao e derrubaria a geracao inteira da prova.
+    """
+    if isinstance(valor, TipoQuestao):
+        return valor
+    if isinstance(valor, str):
+        try:
+            return TipoQuestao(valor.strip().lower())
+        except ValueError:
+            return padrao
+    return padrao
 
 
 def _verificar_acesso_prova(prova, current_user) -> None:
@@ -154,11 +173,21 @@ Por favor, adapte as questões considerando:
             pontos_por_questao = request.pontuacao_total / request.quantidade_questoes
             
             for questao_data in questoes_geradas:
+                # TC-150: a questao guarda o tipo QUE ELA TEM, nao o tipo pedido
+                # na prova. Gravar `request.tipo_questao` em todas achatava
+                # qualquer variacao vinda da IA - inclusive uma dissertativa
+                # devolvida sem `resposta_correta`, que ficava rotulada como
+                # multipla escolha e chegava ao aluno sem campo de resposta.
+                # Valor invalido cai no tipo da prova (a IA as vezes inventa
+                # rotulo), entao isso nunca quebra a geracao.
+                tipo_questao = _tipo_questao_valido(
+                    questao_data.get("tipo"), request.tipo_questao
+                )
                 questao = QuestaoGerada(
                     prova_id=nova_prova.id,
                     numero=questao_data.get("numero"),
                     enunciado=questao_data.get("enunciado"),
-                    tipo=request.tipo_questao,
+                    tipo=tipo_questao,
                     dificuldade=questao_data.get("dificuldade", request.dificuldade),
                     opcoes=questao_data.get("opcoes"),
                     resposta_correta=questao_data.get("resposta_correta"),
@@ -511,15 +540,26 @@ async def finalizar_prova(
         if not questao:
             continue
         
-        # Verifica se está correta
-        esta_correta = questao.resposta_correta.strip().lower() == resposta_data.resposta_aluno.strip().lower()
-        pontos = questao.pontuacao if esta_correta else 0.0
-        
-        if esta_correta:
-            acertos += 1
+        # TC-152: questao dissertativa nao tem `resposta_correta` - o `.strip()`
+        # em None estourava AttributeError e derrubava a correcao inteira em 500.
+        # Sem gabarito nao ha correcao automatica: fica pendente (`esta_correta =
+        # None`) ate o professor corrigir em /aluno/{id}/corrigir-questao, mesma
+        # regra ja aplicada no fluxo do aluno (student_provas.py).
+        if questao.resposta_correta is None:
+            esta_correta = None
+            pontos = 0.0
         else:
+            esta_correta = (
+                questao.resposta_correta.strip().lower()
+                == resposta_data.resposta_aluno.strip().lower()
+            )
+            pontos = questao.pontuacao if esta_correta else 0.0
+
+        if esta_correta is True:
+            acertos += 1
+        elif esta_correta is False:
             erros += 1
-        
+
         pontuacao_obtida += pontos
         
         # Salva resposta
@@ -536,10 +576,20 @@ async def finalizar_prova(
         db.add(resposta)
         respostas_salvas.append(resposta)
     
-    # Calcula nota final
-    nota_final = (pontuacao_obtida / prova.pontuacao_total) * 10
-    aprovado = nota_final >= prova.nota_minima_aprovacao
-    
+    # TC-152: denominador e so o que foi efetivamente corrigido. Com as
+    # discursivas pendentes no divisor, uma prova mista fechava com nota
+    # artificialmente baixa (e uma 100% discursiva, sempre 0).
+    pendentes = [r for r in respostas_salvas if r.esta_correta is None]
+    pontuacao_corrigivel = sum(
+        (r.pontuacao_maxima or 0) for r in respostas_salvas if r.esta_correta is not None
+    )
+    if pontuacao_corrigivel > 0:
+        nota_final = (pontuacao_obtida / pontuacao_corrigivel) * 10
+        aprovado = nota_final >= prova.nota_minima_aprovacao
+    else:
+        nota_final = None
+        aprovado = None
+
     # Calcula tempo gasto
     tempo_gasto = int((datetime.now(timezone.utc) - prova_aluno.data_inicio).total_seconds() / 60) if prova_aluno.data_inicio else 0
     
@@ -547,12 +597,39 @@ async def finalizar_prova(
     prova_aluno.status = StatusProvaAluno.CONCLUIDA
     prova_aluno.data_conclusao = datetime.now(timezone.utc)
     prova_aluno.pontuacao_obtida = pontuacao_obtida
+    prova_aluno.pontuacao_maxima = pontuacao_corrigivel
     prova_aluno.nota_final = nota_final
     prova_aluno.aprovado = aprovado
     prova_aluno.tempo_gasto_minutos = tempo_gasto
-    
+
     db.commit()
-    
+
+    # Com discursivas pendentes a analise sairia de um retrato pela metade (e
+    # custaria tokens a toa). Roda quando a correcao fechar.
+    if pendentes:
+        db.refresh(prova_aluno)
+        return CorrigirProvaResponse(
+            prova_aluno_id=prova_aluno.id,
+            pontuacao_obtida=pontuacao_obtida,
+            pontuacao_maxima=pontuacao_corrigivel,
+            nota_final=nota_final,
+            aprovado=aprovado,
+            acertos=acertos,
+            erros=erros,
+            percentual_acerto=(
+                (acertos / (len(respostas_salvas) - len(pendentes)) * 100)
+                if len(respostas_salvas) > len(pendentes) else 0
+            ),
+            questoes_aguardando_correcao=len(pendentes),
+            nota_parcial=True,
+            analise_ia={},
+            feedback_ia=(
+                f"{len(pendentes)} questão(ões) discursiva(s) aguardam correção "
+                "do professor. A nota sai depois disso."
+            ),
+            respostas_detalhadas=[RespostaAlunoResponse.from_orm(r) for r in respostas_salvas]
+        )
+
     # Gera análise com IA
     try:
         aluno = prova_aluno.aluno
@@ -613,12 +690,14 @@ async def finalizar_prova(
     return CorrigirProvaResponse(
         prova_aluno_id=prova_aluno.id,
         pontuacao_obtida=pontuacao_obtida,
-        pontuacao_maxima=prova.pontuacao_total,
+        pontuacao_maxima=pontuacao_corrigivel,
         nota_final=nota_final,
         aprovado=aprovado,
         acertos=acertos,
         erros=erros,
         percentual_acerto=percentual,
+        questoes_aguardando_correcao=0,
+        nota_parcial=False,
         analise_ia=analise,
         feedback_ia=feedback,
         respostas_detalhadas=[RespostaAlunoResponse.from_orm(r) for r in respostas_salvas]
@@ -647,5 +726,155 @@ def obter_resultado(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Prova ainda não foi finalizada"
         )
-    
+
     return prova_aluno
+
+
+# ============================================
+# CORRECAO MANUAL DE DISSERTATIVAS (TC-152)
+# ============================================
+
+def _carregar_prova_aluno_para_correcao(db: Session, prova_aluno_id: int, current_user: User) -> ProvaAluno:
+    """Carrega a prova do aluno validando ownership da prova (anti-IDOR)."""
+    prova_aluno = db.query(ProvaAluno).filter(ProvaAluno.id == prova_aluno_id).first()
+    if not prova_aluno:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Prova não encontrada"
+        )
+    _verificar_acesso_prova(prova_aluno.prova, current_user)
+    return prova_aluno
+
+
+@router.get("/aluno/{prova_aluno_id}/questoes-pendentes")
+def listar_questoes_pendentes(
+    prova_aluno_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    📝 Lista as questoes discursivas desta prova que aguardam correcao humana.
+
+    Sao as respostas com `esta_correta = None` - questoes sem gabarito, que a
+    correcao automatica nao tem como avaliar. Enquanto existirem, a prova fica
+    em CONCLUIDA e a nota do aluno e parcial (TC-152).
+    """
+    prova_aluno = _carregar_prova_aluno_para_correcao(db, prova_aluno_id, current_user)
+
+    pendentes = db.query(RespostaAluno).filter(
+        RespostaAluno.prova_aluno_id == prova_aluno_id,
+        RespostaAluno.esta_correta.is_(None)
+    ).all()
+
+    questoes = {q.id: q for q in prova_aluno.prova.questoes}
+
+    return {
+        "prova_aluno_id": prova_aluno_id,
+        "aluno_id": prova_aluno.aluno_id,
+        "status": prova_aluno.status.value if prova_aluno.status else None,
+        "total_pendentes": len(pendentes),
+        "questoes": [
+            {
+                "resposta_id": r.id,
+                "questao_id": r.questao_id,
+                "numero": questoes[r.questao_id].numero if r.questao_id in questoes else None,
+                "enunciado": questoes[r.questao_id].enunciado if r.questao_id in questoes else None,
+                "criterios_avaliacao": (
+                    questoes[r.questao_id].criterios_avaliacao if r.questao_id in questoes else None
+                ),
+                "resposta_aluno": r.resposta_aluno,
+                "pontuacao_maxima": r.pontuacao_maxima,
+            }
+            for r in pendentes
+        ]
+    }
+
+
+@router.post("/aluno/{prova_aluno_id}/corrigir-questao", response_model=CorrigirQuestaoResponse)
+def corrigir_questao_dissertativa(
+    prova_aluno_id: int,
+    request: CorrigirQuestaoRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    ✍️ Professor corrige UMA questao discursiva e a nota e recalculada.
+
+    Era a peca que faltava no TC-152: `/responder` deixava a dissertativa com
+    `esta_correta = None` e nada no backend corrigia depois - prova discursiva
+    ficava sem nota para sempre. Aqui o professor atribui os pontos; quando a
+    ultima pendencia cai, a prova vira CORRIGIDA e ganha nota final.
+
+    `esta_correta` e derivado da pontuacao (>= metade do valor da questao conta
+    como acerto), so para alimentar as estatisticas que ja existem - a nota vem
+    da pontuacao, nao desse booleano.
+    """
+    prova_aluno = _carregar_prova_aluno_para_correcao(db, prova_aluno_id, current_user)
+
+    resposta = db.query(RespostaAluno).filter(
+        RespostaAluno.id == request.resposta_id,
+        RespostaAluno.prova_aluno_id == prova_aluno_id
+    ).first()
+    if not resposta:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Resposta não encontrada nesta prova"
+        )
+
+    maxima = resposta.pontuacao_maxima or 0
+    if request.pontuacao > maxima:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Pontuação acima do máximo da questão ({maxima})"
+        )
+
+    resposta.pontuacao_obtida = request.pontuacao
+    resposta.esta_correta = request.pontuacao >= (maxima / 2) if maxima > 0 else False
+    if request.feedback is not None:
+        resposta.feedback = request.feedback
+
+    db.flush()
+
+    # Recalcula os totais da prova inteira a partir das respostas ja corrigidas.
+    respostas = db.query(RespostaAluno).filter(
+        RespostaAluno.prova_aluno_id == prova_aluno_id
+    ).all()
+    pendentes = [r for r in respostas if r.esta_correta is None]
+    pontuacao_obtida = sum((r.pontuacao_obtida or 0) for r in respostas)
+    pontuacao_corrigivel = sum(
+        (r.pontuacao_maxima or 0) for r in respostas if r.esta_correta is not None
+    )
+
+    nota_minima = prova_aluno.prova.nota_minima_aprovacao or 6.0
+    if pontuacao_corrigivel > 0:
+        nota_final = (pontuacao_obtida / pontuacao_corrigivel) * 10
+    else:
+        nota_final = None
+
+    prova_aluno.pontuacao_obtida = pontuacao_obtida
+    prova_aluno.pontuacao_maxima = pontuacao_corrigivel
+    prova_aluno.nota_final = nota_final
+
+    if pendentes:
+        # Ainda incompleta: aprovacao so quando nao houver mais pontos em aberto.
+        prova_aluno.aprovado = None
+    else:
+        prova_aluno.aprovado = (nota_final or 0) >= nota_minima
+        prova_aluno.status = StatusProvaAluno.CORRIGIDA
+        prova_aluno.data_correcao = datetime.now(timezone.utc)
+
+    db.commit()
+    db.refresh(prova_aluno)
+    db.refresh(resposta)
+
+    return CorrigirQuestaoResponse(
+        resposta_id=resposta.id,
+        pontuacao_obtida=resposta.pontuacao_obtida or 0,
+        pontuacao_maxima=maxima,
+        esta_correta=resposta.esta_correta,
+        questoes_aguardando_correcao=len(pendentes),
+        nota_final=round(nota_final, 2) if nota_final is not None else None,
+        aprovado=prova_aluno.aprovado,
+        status=prova_aluno.status,
+        correcao_finalizada=not pendentes
+    )

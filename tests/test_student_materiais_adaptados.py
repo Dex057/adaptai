@@ -11,6 +11,12 @@ Alem de "o aluno ve o proprio material", estes testes travam o isolamento: como
 o filtro por aluno vem do token (e nao de um parametro), material de outro aluno
 nao pode vazar - nem pela listagem, nem pelo detalhe.
 
+TC-033/123/124: a primeira versao da ponte era so leitura, entao favoritar,
+marcar como lido e anotar continuavam sem efeito para esses materiais. Os testes
+de TestInteracoes travam o comportamento dos endpoints de escrita - incluindo o
+isolamento, que aqui importa ainda mais: escrever no material de outro aluno
+seria pior do que le-lo.
+
 Estrategia identica a tests/test_idor_ownership.py: sqlite em memoria, app minimo
 com o router sob teste e override de get_db.
 """
@@ -163,4 +169,78 @@ class TestDetalhe:
 
     def test_sem_token_401(self, client, seed):
         r = client.get(f"/student/materiais-adaptados/{seed['mat_a_id']}")
+        assert r.status_code == 401
+
+
+class TestInteracoes:
+    """TC-033/123/124 - favoritar, marcar como lido e anotar."""
+
+    def test_favoritar_e_desfavoritar(self, client, seed):
+        mat = seed["mat_a_id"]
+        r = client.post(f"/student/materiais-adaptados/{mat}/favorito",
+                        json={"favorito": True}, headers=auth(seed["token_a"]))
+        assert r.status_code == 200
+        assert r.json()["favorito"] is True
+
+        # O estado tem que sobreviver ao request - era exatamente isso que
+        # faltava: antes nao havia coluna onde gravar.
+        r = client.get(f"/student/materiais-adaptados/{mat}", headers=auth(seed["token_a"]))
+        assert r.json()["favorito"] is True
+
+        r = client.post(f"/student/materiais-adaptados/{mat}/favorito",
+                        json={"favorito": False}, headers=auth(seed["token_a"]))
+        assert r.json()["favorito"] is False
+
+    def test_favorito_aparece_na_listagem(self, client, seed):
+        mat = seed["mat_a_id"]
+        client.post(f"/student/materiais-adaptados/{mat}/favorito",
+                    json={"favorito": True}, headers=auth(seed["token_a"]))
+        r = client.get("/student/materiais-adaptados/", headers=auth(seed["token_a"]))
+        assert r.json()[0]["favorito"] is True
+        # limpa para nao contaminar os outros testes do modulo
+        client.post(f"/student/materiais-adaptados/{mat}/favorito",
+                    json={"favorito": False}, headers=auth(seed["token_a"]))
+
+    def test_marcar_lido_preserva_a_primeira_leitura(self, client, seed):
+        mat = seed["mat_b_id"]
+        r1 = client.post(f"/student/materiais-adaptados/{mat}/lido", headers=auth(seed["token_b"]))
+        assert r1.status_code == 200
+        assert r1.json()["lido"] is True
+        primeira = r1.json()["lido_em"]
+        assert primeira is not None
+
+        r2 = client.post(f"/student/materiais-adaptados/{mat}/lido", headers=auth(seed["token_b"]))
+        # Clicar de novo nao reescreve quando o aluno leu pela primeira vez.
+        assert r2.json()["lido_em"] == primeira
+
+    def test_salvar_e_substituir_anotacoes(self, client, seed):
+        mat = seed["mat_a_id"]
+        r = client.post(f"/student/materiais-adaptados/{mat}/anotacoes",
+                        json={"anotacoes": "revisar fracoes equivalentes"},
+                        headers=auth(seed["token_a"]))
+        assert r.status_code == 200
+
+        r = client.get(f"/student/materiais-adaptados/{mat}", headers=auth(seed["token_a"]))
+        assert r.json()["anotacoes"] == "revisar fracoes equivalentes"
+
+        r = client.post(f"/student/materiais-adaptados/{mat}/anotacoes",
+                        json={"anotacoes": "ja entendi"}, headers=auth(seed["token_a"]))
+        assert r.json()["anotacoes"] == "ja entendi"
+
+    def test_nao_escreve_no_material_de_outro_aluno(self, client, seed):
+        """O que mais importa aqui: escrita alheia responde 404, nao 403."""
+        mat_a = seed["mat_a_id"]
+        for path, body in [
+            (f"/student/materiais-adaptados/{mat_a}/favorito", {"favorito": True}),
+            (f"/student/materiais-adaptados/{mat_a}/anotacoes", {"anotacoes": "x"}),
+        ]:
+            r = client.post(path, json=body, headers=auth(seed["token_b"]))
+            assert r.status_code == 404, path
+
+        r = client.post(f"/student/materiais-adaptados/{mat_a}/lido", headers=auth(seed["token_b"]))
+        assert r.status_code == 404
+
+    def test_interacoes_sem_token_401(self, client, seed):
+        mat = seed["mat_a_id"]
+        r = client.post(f"/student/materiais-adaptados/{mat}/favorito", json={"favorito": True})
         assert r.status_code == 401

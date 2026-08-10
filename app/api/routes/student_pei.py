@@ -6,12 +6,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from pydantic import BaseModel
-from datetime import date
+from datetime import date, datetime, timezone
 
 from app.database import get_db
 from app.models.student import Student
 from app.models.pei import PEI, PEIObjetivo
 from app.api.dependencies import get_current_student
+from app.utils.pei_prazos import prazo_vencido as calcular_prazo_vencido
 
 router = APIRouter()
 
@@ -30,14 +31,24 @@ class ObjetivoResumo(BaseModel):
     valor_atual: Optional[float]
     valor_alvo: Optional[float]
     prazo: Optional[date]
+    # TC-129: o aluno precisa enxergar meta com prazo estourado, nao so a data
+    # crua. Mesmo calculo do PEI do professor (planejamento_bncc.py).
+    prazo_vencido: bool = False
     codigo_bncc: Optional[str]
-    
+
     class Config:
         from_attributes = True
 
 
 class PEIResumo(BaseModel):
-    id: int
+    # TC-034/040: o endpoint respondia 200 com corpo `null` quando o aluno nao
+    # tinha PEI, e o cliente estourava TypeError ao ler `.objetivos` de null.
+    # Agora a resposta e sempre um objeto bem formado: `tem_pei = false` com
+    # listas vazias descreve o estado "sem PEI" sem obrigar o consumidor a
+    # tratar null. `id` virou opcional porque nesse caso nao ha PEI para
+    # identificar.
+    tem_pei: bool = True
+    id: Optional[int] = None
     ano_letivo: str
     status: str
     data_inicio: Optional[date]
@@ -47,7 +58,7 @@ class PEIResumo(BaseModel):
     objetivos_por_status: dict
     progresso_geral: float
     objetivos: List[ObjetivoResumo]
-    
+
     class Config:
         from_attributes = True
 
@@ -56,23 +67,39 @@ class PEIResumo(BaseModel):
 # ROTAS
 # ============================================
 
-@router.get("/meu-pei", response_model=Optional[PEIResumo])
+@router.get("/meu-pei", response_model=PEIResumo)
 def get_meu_pei(
     db: Session = Depends(get_db),
     current_student: Student = Depends(get_current_student)
 ):
     """
-    Retorna o PEI ativo do estudante logado
+    Retorna o PEI ativo do estudante logado.
+
+    Aluno sem PEI recebe 200 com `tem_pei: false` e listas vazias - nunca `null`
+    (TC-034/040). 404 tambem foi descartado: nao ter PEI ainda nao e erro, e um
+    estado normal do aluno recem-cadastrado.
     """
     # Buscar PEI ativo do aluno
     pei = db.query(PEI).filter(
         PEI.student_id == current_student.id,
         PEI.status.in_(["ativo", "rascunho"])  # Mostrar rascunho também por enquanto
     ).order_by(PEI.created_at.desc()).first()
-    
+
     if not pei:
-        return None
-    
+        return PEIResumo(
+            tem_pei=False,
+            id=None,
+            ano_letivo=str(datetime.now(timezone.utc).year),
+            status="sem_pei",
+            data_inicio=None,
+            data_fim=None,
+            total_objetivos=0,
+            objetivos_por_area={},
+            objetivos_por_status={},
+            progresso_geral=0.0,
+            objetivos=[]
+        )
+
     # Buscar objetivos
     objetivos = db.query(PEIObjetivo).filter(
         PEIObjetivo.pei_id == pei.id
@@ -123,10 +150,12 @@ def get_meu_pei(
             valor_atual=float(obj.valor_atual) if obj.valor_atual else 0,
             valor_alvo=float(obj.valor_alvo) if obj.valor_alvo else 100,
             prazo=obj.prazo,
+            prazo_vencido=calcular_prazo_vencido(obj.prazo, obj.status),
             codigo_bncc=obj.codigo_bncc
         ))
-    
+
     return PEIResumo(
+        tem_pei=True,
         id=pei.id,
         ano_letivo=pei.ano_letivo or "2025",
         status=pei.status or "rascunho",

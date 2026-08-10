@@ -30,7 +30,19 @@ class MaterialAdaptadoGerado(Base):
     tempo_geracao = Column(Integer, nullable=True)  # Em segundos
     created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    
+
+    # TC-033/123/124: interacoes do aluno com o material.
+    # Ate a migration 007 estas colunas nao existiam aqui - so em `materiais_alunos`
+    # (model MaterialAluno), que e outro pipeline. Como o material gerado pelo
+    # professor nunca passa por `materiais_alunos`, favoritar/marcar como lido/anotar
+    # simplesmente nao tinha onde ser gravado para esses materiais. Mesmos nomes e
+    # mesma semantica de MaterialAluno (favorito como Integer 0/1) para o front
+    # reaproveitar o componente.
+    favorito = Column(Integer, default=0)  # 0 = nao, 1 = sim
+    lido = Column(Integer, default=0)  # 0 = nao, 1 = sim
+    lido_em = Column(DateTime, nullable=True)
+    anotacoes_aluno = Column(Text, nullable=True)
+
     # Relacionamentos
     student = relationship("Student", back_populates="materiais_adaptados_gerados")
     creator = relationship("User")

@@ -307,10 +307,34 @@ async def finalizar(
     pontuacao_obtida = sum((r.pontuacao_obtida or 0) for r in respostas)
     prova = db.query(Prova).filter(Prova.id == prova_aluno.prova_id).first()
 
-    pontuacao_total = prova.pontuacao_total or 0
-    nota_final = (pontuacao_obtida / pontuacao_total) * 10 if pontuacao_total > 0 else 0
+    # TC-152: questoes dissertativas ficam com `esta_correta = None` em /responder
+    # (nao ha gabarito para comparar - a correcao e humana, via
+    # POST /provas/aluno/{id}/corrigir-questao). Dividir por `prova.pontuacao_total`
+    # jogava o peso dessas questoes no denominador mesmo sem ninguem ter corrigido
+    # ainda: uma prova 100% discursiva fechava 0/10 e reprovava o aluno na hora.
+    # Agora o denominador e so o que JA foi corrigido; o resto entra quando o
+    # professor corrigir.
+    pendentes = [r for r in respostas if r.esta_correta is None]
+    pontuacao_corrigivel = sum(
+        (r.pontuacao_maxima or 0) for r in respostas if r.esta_correta is not None
+    )
+
     nota_minima = prova.nota_minima_aprovacao or 6.0
-    aprovado = nota_final >= nota_minima
+    if pontuacao_corrigivel > 0:
+        nota_final = (pontuacao_obtida / pontuacao_corrigivel) * 10
+        atingiu_minima = nota_final >= nota_minima
+        # Com questoes pendentes a nota so pode subir, entao "reprovado" seria um
+        # veredito prematuro: afirmamos aprovacao, nunca reprovacao (None = "ainda
+        # nao da para dizer").
+        if pendentes:
+            aprovado = True if atingiu_minima else None
+        else:
+            aprovado = atingiu_minima
+    else:
+        # Nada correta automaticamente (prova inteiramente discursiva): sem nota
+        # ate a correcao do professor. Zero aqui seria uma nota inventada.
+        nota_final = None
+        aprovado = None
 
     agora = datetime.now(timezone.utc)
     # FIX: data_inicio foi setado com datetime.now(timezone.utc) em iniciar_prova.
@@ -325,11 +349,16 @@ async def finalizar(
     else:
         tempo_gasto = None
 
-    prova_aluno.status = StatusProvaAluno.CORRIGIDA
+    # Com questoes pendentes a prova esta CONCLUIDA (o aluno terminou), nao
+    # CORRIGIDA (ninguem corrigiu as discursivas ainda). Quem fecha para
+    # CORRIGIDA e o professor, ao corrigir a ultima questao pendente.
+    prova_aluno.status = (
+        StatusProvaAluno.CONCLUIDA if pendentes else StatusProvaAluno.CORRIGIDA
+    )
     prova_aluno.data_conclusao = agora
-    prova_aluno.data_correcao = agora
+    prova_aluno.data_correcao = None if pendentes else agora
     prova_aluno.pontuacao_obtida = pontuacao_obtida
-    prova_aluno.pontuacao_maxima = pontuacao_total
+    prova_aluno.pontuacao_maxima = pontuacao_corrigivel
     prova_aluno.nota_final = nota_final
     prova_aluno.aprovado = aprovado
     prova_aluno.tempo_gasto_minutos = tempo_gasto
@@ -337,23 +366,42 @@ async def finalizar(
     db.refresh(prova_aluno)
 
     acertos = sum(1 for r in respostas if r.esta_correta)
-    percentual = round((acertos / len(respostas) * 100) if len(respostas) > 0 else 0, 1)
+    # Denominador: so as questoes ja corrigidas. Com as pendentes no divisor, uma
+    # prova mista mostrava "2 de 10 acertos (20%)" antes de a correcao acontecer.
+    corrigidas = len(respostas) - len(pendentes)
+    percentual = round((acertos / corrigidas * 100) if corrigidas > 0 else 0, 1)
 
     # FIX: BackgroundTasks (em vez de asyncio.create_task) garante que a
     # funcao roda DEPOIS do response ser enviado, gerenciada pelo FastAPI
     # (sem risco de garbage collection). A funcao agora e sincrona para
     # nao bloquear o event loop chamando SDK sincrono do Anthropic de
     # dentro de uma task async.
-    background_tasks.add_task(processar_pos_prova, prova_aluno_id)
+    # Sem correcao completa nao ha o que analisar: a analise qualitativa e a prova
+    # de reforco sairiam de um retrato pela metade (e custariam tokens de IA a
+    # toa). Rodam quando o professor fechar a correcao.
+    if not pendentes:
+        background_tasks.add_task(processar_pos_prova, prova_aluno_id)
+
+    if pendentes:
+        message = (
+            f"Prova enviada! {len(pendentes)} questão(ões) discursiva(s) "
+            "aguardam correção do professor."
+        )
+    else:
+        message = "Prova finalizada! Gerando analise e prova de reforco automaticamente..."
 
     return {
-        "message": "Prova finalizada! Gerando analise e prova de reforco automaticamente...",
-        "nota_final": round(nota_final, 2),
+        "message": message,
+        "nota_final": round(nota_final, 2) if nota_final is not None else None,
         "aprovado": aprovado,
         "acertos": acertos,
         "total_questoes": len(respostas),
+        "questoes_corrigidas": corrigidas,
+        # TC-152: o front precisa distinguir "tirou 0" de "ainda nao foi corrigida".
+        "questoes_aguardando_correcao": len(pendentes),
+        "nota_parcial": bool(pendentes),
         "percentual": percentual,
-        "processando_ia": True
+        "processando_ia": not pendentes
     }
 
 

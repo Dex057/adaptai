@@ -29,7 +29,7 @@ class Ocorrencia:
     path: str
     line: int
     model: str
-    contexto: str            # "chamada" | "atribuicao" | "literal"
+    contexto: str            # "chamada" | "atribuicao" | "config" | "literal"
 
     def __str__(self) -> str:
         return f"{self.path}:{self.line}  {self.model}  ({self.contexto})"
@@ -71,17 +71,43 @@ def _varrer(root: Path) -> list[Ocorrencia]:
                     else:
                         continue
                     out.append(Ocorrencia(rel, node.lineno, v, ctx))
-            # MODELO = "..." / self.model = "..." — vira chamada mais tarde
-            elif isinstance(node, ast.Assign):
-                if isinstance(node.value, ast.Constant) and \
-                        isinstance(node.value.value, str) and MODELO_RE.match(node.value.value):
-                    alvo = node.targets[0]
-                    nome = (alvo.id if isinstance(alvo, ast.Name)
-                            else alvo.attr if isinstance(alvo, ast.Attribute) else "")
-                    ctx = "atribuicao" if "model" in nome.lower() or "modelo" in nome.lower() \
-                        else "literal"
-                    out.append(Ocorrencia(rel, node.lineno, node.value.value, ctx))
-    return out
+            # MODELO = "..." / self.model = "..." — vira chamada mais tarde.
+            # AnnAssign entra junto: `campo: Optional[str] = "claude-..."` (default de
+            # campo Pydantic) é AnnAssign, não Assign. Sem isso o scanner passava por
+            # cima de todo default de schema — foi assim que ele deu "0 referências"
+            # num repositório que tinha duas.
+            elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+                alvo = node.targets[0] if isinstance(node, ast.Assign) else node.target
+                nome = (alvo.id if isinstance(alvo, ast.Name)
+                        else alvo.attr if isinstance(alvo, ast.Attribute) else "")
+                parece_campo_de_modelo = "model" in nome.lower() or "modelo" in nome.lower()
+                valor = node.value
+                if valor is None:                     # `campo: str` sem atribuição
+                    continue
+                if isinstance(valor, ast.Constant) and isinstance(valor.value, str) \
+                        and MODELO_RE.match(valor.value):
+                    ctx = "atribuicao" if parece_campo_de_modelo else "literal"
+                    out.append(Ocorrencia(rel, node.lineno, valor.value, ctx))
+                elif parece_campo_de_modelo:
+                    # Literal enterrado no valor, quando o NOME do alvo já diz que é
+                    # campo de modelo: Column(String(100), default="claude-..."),
+                    # Field(default="claude-..."), etc. A regra de `Call` acima não
+                    # pega porque a keyword se chama `default`, não `model`.
+                    for sub in ast.walk(valor):
+                        if isinstance(sub, ast.Constant) and isinstance(sub.value, str) \
+                                and MODELO_RE.match(sub.value):
+                            out.append(Ocorrencia(rel, getattr(sub, "lineno", node.lineno),
+                                                  sub.value, "config"))
+
+    # Dedup: um mesmo literal pode ser visto pela regra de Call e pela de Assign.
+    # Precedência pelo quanto dói: chamada quebra em runtime, config é latente.
+    peso = {"chamada": 0, "atribuicao": 1, "config": 2, "literal": 3}
+    melhor: dict[tuple, Ocorrencia] = {}
+    for o in out:
+        chave = (o.path, o.line, o.model)
+        if chave not in melhor or peso[o.contexto] < peso[melhor[chave].contexto]:
+            melhor[chave] = o
+    return sorted(melhor.values(), key=lambda o: (o.path, o.line))
 
 
 def _modelos_vivos(api_key: str | None = None) -> list[str] | None:

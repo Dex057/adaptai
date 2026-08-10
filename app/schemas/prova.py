@@ -225,17 +225,53 @@ class CorrigirProvaResponse(BaseModel):
     """Schema de resposta da correção"""
     prova_aluno_id: int
     pontuacao_obtida: float
+    # TC-152: com questoes discursivas pendentes, `pontuacao_maxima` e o total JA
+    # corrigido (nao o total da prova) e a nota ainda nao existe - dai
+    # `nota_final`/`aprovado` nulos. Antes eram obrigatorios, o que forcava
+    # inventar 0/False e reprovar o aluno por uma correcao que nem aconteceu.
     pontuacao_maxima: float
-    nota_final: float
-    aprovado: bool
+    nota_final: Optional[float] = None
+    aprovado: Optional[bool] = None
     acertos: int
     erros: int
     percentual_acerto: float
+    questoes_aguardando_correcao: int = 0
+    nota_parcial: bool = False
     analise_ia: Dict[str, Any]
     feedback_ia: str
     respostas_detalhadas: List[RespostaAlunoResponse]
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class CorrigirQuestaoRequest(BaseModel):
+    """
+    TC-152: correcao manual de uma questao discursiva pelo professor.
+
+    Questoes sem gabarito ficam com `esta_correta = None` na finalizacao e nao
+    entram no calculo da nota ate passarem por aqui.
+    """
+    resposta_id: int = Field(..., description="ID da RespostaAluno a corrigir")
+    pontuacao: float = Field(
+        ..., ge=0,
+        description="Pontos atribuidos (0 ate a pontuacao maxima da questao)"
+    )
+    feedback: Optional[str] = Field(
+        None, max_length=5000, description="Comentario do professor sobre a resposta"
+    )
+
+
+class CorrigirQuestaoResponse(BaseModel):
+    """Estado da prova do aluno depois de corrigir uma questao discursiva"""
+    resposta_id: int
+    pontuacao_obtida: float
+    pontuacao_maxima: float
+    esta_correta: Optional[bool]
+    questoes_aguardando_correcao: int
+    nota_final: Optional[float]
+    aprovado: Optional[bool]
+    status: StatusProvaAluno
+    correcao_finalizada: bool
 
 
 class ProvaListResponse(BaseModel):

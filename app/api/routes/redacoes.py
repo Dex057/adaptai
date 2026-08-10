@@ -468,7 +468,25 @@ async def submeter_redacao(
         
         if redacao.status == StatusRedacao.CORRIGIDA:
             raise HTTPException(status_code=400, detail="Redação já foi corrigida")
-        
+
+        # TC-144: texto curto demais nao deve virar "redacao anulada, nota 0".
+        # Antes, qualquer coisa entre 50 caracteres e 50 palavras passava pela
+        # validacao do schema, chegava no corretor, batia no piso de 50 palavras
+        # de `corrigir_redacao_enem` e voltava como ANULADA com zero em todas as
+        # competencias - um 200 que gravava nota 0 no historico do aluno por um
+        # rascunho enviado sem querer. Agora barramos antes: nada e persistido,
+        # nenhum token de IA e gasto, e a mensagem diz o que falta.
+        MINIMO_PALAVRAS = 50
+        palavras = len(request.texto.split())
+        if palavras < MINIMO_PALAVRAS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Sua redação tem {palavras} palavra(s). O mínimo para correção "
+                    f"é {MINIMO_PALAVRAS}. Continue escrevendo e envie de novo."
+                )
+            )
+
         # Atualizar texto
         redacao.titulo_redacao = request.titulo_redacao
         redacao.texto = request.texto

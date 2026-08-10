@@ -7,9 +7,16 @@ from app.models.user import User
 from app.models.performance import PerformanceAnalysis
 from app.models.student import Student
 from app.schemas.performance import PerformanceAnalysisResponse, PerformanceSummary
-from app.api.dependencies import get_current_active_user
+from app.api.dependencies import get_current_active_user, verificar_acesso_aluno
 
 router = APIRouter(prefix="/analytics", tags=["Analytics"])
+
+# TC-075: este modulo checava ownership com `Student.created_by_user_id ==
+# current_user.id` - regra de professor aplicada a todo mundo. Admin e
+# coordenador nao conseguiam ver o desempenho de aluno da propria escola
+# (404 "Student not found"), porque nao foram eles que cadastraram o aluno.
+# `verificar_acesso_aluno` (app/api/dependencies.py) e a regra unica do projeto:
+# super_admin ve todos, admin/coordenador veem a escola, professor ve os seus.
 
 @router.get("/student/{student_id}/performance", response_model=List[PerformanceAnalysisResponse])
 def get_student_performance(
@@ -20,18 +27,9 @@ def get_student_performance(
     """
     Obter histórico completo de análises de desempenho de um estudante
     """
-    # Verificar se o estudante pertence ao usuário
-    student = db.query(Student).filter(
-        Student.id == student_id,
-        Student.created_by_user_id == current_user.id
-    ).first()
-    
-    if not student:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Student not found"
-        )
-    
+    # TC-075: acesso por papel (404 se nao existe, 403 se existe e nao e seu)
+    verificar_acesso_aluno(db, student_id, current_user)
+
     # Buscar análises
     analyses = db.query(PerformanceAnalysis).filter(
         PerformanceAnalysis.student_id == student_id
@@ -84,18 +82,9 @@ def get_student_summary(
     """
     Obter resumo rápido do desempenho do estudante
     """
-    # Verificar se o estudante pertence ao usuário
-    student = db.query(Student).filter(
-        Student.id == student_id,
-        Student.created_by_user_id == current_user.id
-    ).first()
-    
-    if not student:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Student not found"
-        )
-    
+    # TC-075: acesso por papel (404 se nao existe, 403 se existe e nao e seu)
+    student = verificar_acesso_aluno(db, student_id, current_user)
+
     # Buscar última análise
     latest_analysis = db.query(PerformanceAnalysis).filter(
         PerformanceAnalysis.student_id == student_id
@@ -222,15 +211,14 @@ def compare_students_performance(
     comparisons = []
     
     for student_id in ids:
-        # Verificar se o estudante pertence ao usuário
-        student = db.query(Student).filter(
-            Student.id == student_id,
-            Student.created_by_user_id == current_user.id
-        ).first()
-        
-        if not student:
+        # TC-075: mesma regra de acesso dos demais endpoints. Aluno inacessivel
+        # e pulado em silencio (a comparacao e best-effort - nao faz sentido
+        # derrubar o grafico inteiro por um ID que o usuario nao pode ver).
+        try:
+            student = verificar_acesso_aluno(db, student_id, current_user)
+        except HTTPException:
             continue
-        
+
         # Buscar última análise
         latest_analysis = db.query(PerformanceAnalysis).filter(
             PerformanceAnalysis.student_id == student_id

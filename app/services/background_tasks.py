@@ -85,16 +85,21 @@ class BackgroundTaskManager:
         input_data: Optional[Dict[str, Any]] = None,
         user_id: Optional[int] = None,
         student_id: Optional[int] = None,
+        task_id: Optional[str] = None,
     ) -> str:
         """
         Cria nova tarefa e retorna o task_id publico (UUID).
-        
+
         Args opcionais novos (nao obrigatorios - codigo antigo continua funcionando):
         - task_type: classificacao da tarefa para filtros ("gerar_material", etc)
         - input_data: JSON com parametros de entrada
         - user_id / student_id: quem criou
+        - task_id: reaproveita um UUID ja gerado pelo chamador. Necessario
+          quando outra tabela (ex: planejamento_jobs) precisa ser criada com o
+          MESMO id antes desta - ver correcao do 404 em planejamento_bncc.py.
+          Omitido, o id continua sendo gerado aqui como sempre.
         """
-        task_id = str(uuid.uuid4())
+        task_id = task_id or str(uuid.uuid4())
         db = SessionLocal()
         try:
             task = BackgroundTask(

@@ -29,6 +29,46 @@ class MaterialRequest(BaseModel):
     tipos_material: List[str]
 
 
+# ============================================================================
+# HOMOLOGACAO DE TIPOS (2026-08-11)
+# ============================================================================
+# Dos 37 tipos implementados, apenas os listados abaixo passaram na validacao
+# de qualidade. Os demais continuam com prompt, viewer e historico intactos —
+# apenas nao podem ser gerados. Isso evita entregar material ruim ao aluno sem
+# perder o trabalho ja feito.
+#
+# PARA LIBERAR UM TIPO: adicione o id em TIPOS_HABILITADOS.
+#
+# !! MANTENHA EM SINCRONIA COM O FRONTEND !!
+# Espelho em adaptai-frontend/src/pages/materiaisAdaptados/config.js
+# (const TIPOS_HABILITADOS). Aqui e a fonte de verdade que REJEITA; la e so o
+# que a UI deixa clicar.
+TIPOS_HABILITADOS = {
+    # 📚 Leitura (completo)
+    "texto_niveis", "resumo_estruturado", "ficha_leitura",
+    # 🎨 Visual
+    "infografico", "tabela_comparativa", "linha_tempo", "diagrama_venn",
+    # mapa_mental: nao constava na lista de homologacao, mas tem viewer
+    # dedicado e esta em uso em producao — bloquea-lo seria regressao.
+    "mapa_mental",
+    # 🧠 Memorizacao
+    "flashcards", "jogo_memoria",
+    # 🎮 Jogos
+    "caca_palavras", "quiz_interativo", "roleta_perguntas",
+    # cruzadinha: mesma situacao do mapa_mental (viewer dedicado, em producao).
+    "cruzadinha",
+    # 💙 TEA/TDAH
+    "historia_social", "termometro_emocoes", "cartoes_comunicacao",
+    "checklist_tarefas",
+    # ✍️ Completar
+    "verdadeiro_falso", "complete_lacunas", "ordenar_sequencia",
+    # 📝 Avaliacao (qualidade dos 3 formatos ainda em validacao pedagogica)
+    "avaliacao",
+    # 🔬 Praticos (categoria inteira; qualidade a validar)
+    "experimento", "receita_procedimento", "estudo_caso", "diario_bordo",
+}
+
+
 # Mapeamento de tipos para métodos do service
 TIPOS_MATERIAIS = {
     # Leitura
@@ -108,7 +148,23 @@ async def gerar_materiais_adaptados(
     )
     
     inicio = time.time()
-    
+
+    # HOMOLOGACAO: recusar tipos ainda nao liberados ANTES de gastar credito de
+    # IA. A UI ja bloqueia o clique, entao chegar aqui significa chamada direta
+    # a API ou state antigo no browser. 422 com a lista do que foi recusado.
+    nao_liberados = [
+        t for t in request_body.tipos_material
+        if t in TIPOS_MATERIAIS and t not in TIPOS_HABILITADOS
+    ]
+    if nao_liberados:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Os seguintes tipos ainda estao em validacao e nao podem ser "
+                f"gerados: {', '.join(nao_liberados)}."
+            ),
+        )
+
     # SEGURANCA: verificar acesso ao aluno (evita IDOR entre escolas)
     student = verificar_acesso_aluno(db, request_body.student_id, current_user)
     
@@ -209,28 +265,41 @@ async def gerar_materiais_adaptados(
 async def listar_tipos_materiais(
     current_user: User = Depends(get_current_active_user)
 ):
-    """Lista todos os 25+ tipos de materiais disponíveis por categoria"""
-    
+    """
+    Lista os tipos de materiais por categoria.
+
+    Cada item traz `disponivel`: False = implementado porem ainda em validacao
+    de qualidade ("Em breve" na UI). O frontend usa isto para desabilitar o
+    card sem precisar duplicar a regra.
+    """
+
     # Agrupar por categoria
     por_categoria = {}
     for tipo_id, config in TIPOS_MATERIAIS.items():
         categoria = config["categoria"]
         if categoria not in por_categoria:
             por_categoria[categoria] = []
-        
+
         por_categoria[categoria].append({
             "id": tipo_id,
             "nome": config["nome"],
-            "usa_diagnostico": config.get("usa_diagnostico", False)
+            "usa_diagnostico": config.get("usa_diagnostico", False),
+            "disponivel": tipo_id in TIPOS_HABILITADOS,
         })
-    
+
     return {
         "total_tipos": len(TIPOS_MATERIAIS),
+        "total_disponiveis": len(TIPOS_HABILITADOS),
         "por_categoria": por_categoria,
         "lista_completa": [
-            {"id": k, "nome": v["nome"], "categoria": v["categoria"]}
+            {
+                "id": k,
+                "nome": v["nome"],
+                "categoria": v["categoria"],
+                "disponivel": k in TIPOS_HABILITADOS,
+            }
             for k, v in TIPOS_MATERIAIS.items()
-        ]
+        ],
     }
 
 

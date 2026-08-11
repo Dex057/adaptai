@@ -1,0 +1,60 @@
+# AdaptAI — Contexto do projeto
+
+Este repositório (`adaptai`) é o **backend** (FastAPI). O **frontend** é um repositório
+separado, em outra pasta na mesma máquina:
+
+```
+C:\Users\Nexus\Downloads\Projetos\adaptai-frontend
+```
+
+## Frontend — visão rápida
+
+- Stack: React 18 + Vite + React Router + Tailwind + Axios + Recharts.
+- Consome a API deste backend via `VITE_API_URL` (`.env.example`), default
+  `http://localhost:8000/api/v1` — mesmo prefixo `/api/v1` usado pelas rotas FastAPI aqui.
+- Cliente HTTP central: `src/services/api.js`.
+- Estrutura de `src/`: `pages/` (inclui `pages/materiaisAdaptados`, `pages/peiForm`,
+  `pages/testeNegocio`), `components/` (+ `components/ui`), `contexts/`, `hooks/`,
+  `services/`, `constants/`, `accessibility/`.
+
+## Como usar os dois repos juntos
+
+Ao investigar um bug ou TC da planilha de QA que envolva UI (ex.: "opção não aparece pro
+professor", "tela em branco", "botão não funciona"), vale checar **os dois lados**:
+- Backend: rota/endpoint em `app/api/routes/`, lógica em `app/services/`.
+- Frontend: página/componente correspondente em `adaptai-frontend/src/pages/` ou
+  `src/components/`, e a chamada de API em `src/services/`.
+
+Não assumir que um problema é só de um lado sem checar ambos os repositórios quando a
+causa raiz não estiver clara.
+
+## Regras de segurança/QA (herdadas da planilha de testes)
+
+- Não alterar/criar prompts de IA "às cegas" (sem validação com poucos exemplos) — mudanças
+  de comportamento de IA têm custo e precisam de aprovação.
+- Não gerar conteúdo de IA em massa para testes.
+- Ver `docs/qa-agente-relatorio.md` para o histórico de investigação por TC da planilha de QA.
+
+## Documentos de arquitetura (leia antes de mexer em conteúdo)
+
+- `docs/ARQUITETURA-CONTEUDOS.md` — diferença entre **Materiais** (biblioteca
+  reutilizável do professor, N:N via `MaterialAluno`) e **Materiais Adaptados**
+  (geração sob medida por aluno, usa `student.diagnosis`). Explica o padrão
+  **conteúdo × ponte** que todo artefato deve seguir: nenhum conteúdo gerado por IA
+  carrega `student_id` como *posse* — posse vive na tabela ponte.
+- `docs/CORRECOES-2026-08-11.md` — rodada de correções (materiais adaptados,
+  planejamento 404, encoding, toasts, rótulos). Traz sintoma → causa raiz → correção
+  de cada item e a lista de pendências conscientes.
+
+## Homologação de tipos de material adaptado
+
+Nem todos os 37 tipos estão liberados. A allowlist vive em **dois** lugares e
+precisa ficar em sincronia:
+
+- `app/api/routes/materiais_adaptados.py` → `TIPOS_HABILITADOS` (**fonte de verdade**;
+  rejeita a geração com 422 antes de gastar crédito de IA)
+- `adaptai-frontend/src/pages/materiaisAdaptados/config.js` → `TIPOS_HABILITADOS`
+  (controla o que a UI deixa clicar; o resto aparece com selo "Em breve")
+
+Tipos bloqueados **mantêm** prompt, viewer e histórico — só não podem ser gerados.
+Para liberar um tipo, adicione o id nas duas listas.

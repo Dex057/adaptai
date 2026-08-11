@@ -1,7 +1,7 @@
 """
 Rotas para Materiais de Estudo - COM STORAGE E AGENDA
 """
-from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Query
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import OperationalError
 from typing import List
@@ -285,8 +285,10 @@ async def criar_material(
 
 @router.get("/")
 async def listar_materiais(
-    tipo: str = None,
-    materia: str = None,
+    tipo: TipoMaterial | None = Query(
+        None, description="Filtra por tipo (visual, mapa_mental, resumo, ...)"
+    ),
+    materia: str | None = Query(None, description="Nome da materia"),
     pagination: PaginationParams = Depends(),
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
@@ -310,10 +312,16 @@ async def listar_materiais(
     array puro precisa acessar response.items ao inves de response direto.
     """
     query = db.query(Material).filter(Material.criado_por_id == current_user.id)
-    
+
+    # 2026-08-11: antes era `Material.tipo == tipo.upper()`, comparando com
+    # "VISUAL" enquanto TipoMaterial usa valores minusculos ("visual"). O
+    # SQLAlchemy tentava TipoMaterial("VISUAL") e levantava LookupError -> 500.
+    # Na pratica, clicar nas abas "Visuais" / "Mapas Mentais" quebrava a
+    # listagem. Tipando o parametro como o proprio Enum, o FastAPI valida e
+    # converte antes de chegar aqui (e o Swagger ganha um dropdown).
     if tipo:
-        query = query.filter(Material.tipo == tipo.upper())
-    
+        query = query.filter(Material.tipo == tipo)
+
     if materia:
         query = query.filter(Material.materia == materia)
     

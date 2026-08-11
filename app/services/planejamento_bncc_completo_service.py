@@ -803,9 +803,13 @@ IMPORTANTE:
                 f"Aguarde a conclusão ou aguarde o timeout automático."
             )
         
+        # 2026-08-11: a rota /async agora cria o job ANTES de devolver o
+        # task_id (correcao do 404 no primeiro polling). Se ele ja existe,
+        # reaproveitamos em vez de criar um segundo com o mesmo task_id.
+        job = self.obter_job(task_id)
+
         # Tentar retomar job existente
-        job = None
-        if retomar_job:
+        if not job and retomar_job:
             job = self.obter_job_para_retomar(student_id, ano_letivo)
             if job:
                 logger.info(f"[INFO] Retomando job existente: {job.task_id}")

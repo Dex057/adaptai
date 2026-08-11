@@ -54,13 +54,41 @@ class MaterialAdaptadoService:
         )
         result = response.content[0].text.strip()
         result = result.replace("```json", "").replace("```", "").strip()
-        
+
+        # 2026-08-11 — DETECCAO DE TRUNCAMENTO
+        # Antes nao existia nenhuma checagem de stop_reason. Quando a resposta
+        # batia no teto de max_tokens, o JSON vinha cortado no meio, o
+        # json.loads falhava e o professor via apenas "erro na geracao" — sem
+        # nenhuma pista de que a causa era o teto de tokens, e nao a IA.
+        # Foi o que aconteceu com "Texto em 3 Niveis" e "Ficha de Leitura".
+        stop_reason = getattr(response, "stop_reason", None)
+        if stop_reason == "max_tokens":
+            logger.error(
+                "Resposta da IA truncada no limite de tokens",
+                extra={
+                    "cache_type": cache_type,
+                    "max_tokens": max_tokens,
+                    "tamanho_resposta": len(result),
+                },
+            )
+            raise ValueError(
+                f"A resposta da IA foi cortada no limite de {max_tokens} tokens. "
+                f"O conteudo pedido e longo demais para este tipo de material — "
+                f"tente um conteudo mais especifico ou aumente o max_tokens de "
+                f"'{cache_type}' em ai_materiais_service.py."
+            )
+
         try:
             parsed = json.loads(result)
         except json.JSONDecodeError as e:
             logger.warning(
                 "Resposta da IA nao e JSON valido - nao cacheando",
-                extra={"cache_type": cache_type, "erro": str(e)},
+                extra={
+                    "cache_type": cache_type,
+                    "erro": str(e),
+                    "stop_reason": stop_reason,
+                    "preview": result[:300],
+                },
             )
             # Nao cacheia resposta invalida - relanca para o chamador tratar
             raise
@@ -93,7 +121,7 @@ AVANÇADO: Texto acadêmico completo.
 FORMATO JSON:
 {{"basico": "texto", "intermediario": "texto", "avancado": "texto", "vocabulario": {{"termo": "definição"}}}}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 4096, cache_type="texto_3_niveis")
+        return self._chamar_ia(prompt, 8192, cache_type="texto_3_niveis")
     
     def gerar_resumo_estruturado(self, disciplina: str, serie: str, conteudo: str) -> Dict[str, Any]:
         """Gera resumo com estrutura visual clara"""
@@ -114,7 +142,7 @@ FORMATO JSON:
   "dica_estudo": "Como revisar este conteúdo"
 }}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 2048)
+        return self._chamar_ia(prompt, 4096, cache_type="resumo_estruturado")
     
     def gerar_ficha_leitura(self, disciplina: str, serie: str, conteudo: str) -> Dict[str, Any]:
         """Gera ficha de leitura para textos/livros"""
@@ -134,7 +162,10 @@ FORMATO JSON:
   "conexao_vida": "Como isso se conecta com sua vida?"
 }}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 2048)
+        # 2026-08-11: 2048 truncava (10 campos, enredo com 4 subcampos,
+        # lista de personagens). Era a causa do "Ficha de Leitura: erro na
+        # geracao" reportado em producao.
+        return self._chamar_ia(prompt, 4096, cache_type="ficha_leitura")
     
     # ==========================================
     # 🎨 MATERIAIS VISUAIS
@@ -148,7 +179,7 @@ Use símbolos, emojis, setas, boxes.
 FORMATO JSON:
 {{"titulo": "título", "conteudo_markdown": "infográfico em markdown", "elementos_visuais": ["sugestão1"]}}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 3072, cache_type="infografico")
+        return self._chamar_ia(prompt, 6144, cache_type="infografico")
     
     def gerar_mapa_mental(self, disciplina: str, serie: str, conteudo: str) -> Dict[str, Any]:
         """Gera mapa mental"""
@@ -206,7 +237,7 @@ FORMATO JSON:
   "conclusao": "O que aprendemos com essa comparação"
 }}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 2048)
+        return self._chamar_ia(prompt, 4096, cache_type="diagrama_venn")
     
     def gerar_tabela_comparativa(self, disciplina: str, serie: str, conteudo: str) -> Dict[str, Any]:
         """Gera tabela comparativa"""
@@ -224,7 +255,7 @@ FORMATO JSON:
   "conclusao": "Síntese da comparação"
 }}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 2048)
+        return self._chamar_ia(prompt, 4096, cache_type="tabela_comparativa")
     
     def gerar_arvore_decisao(self, disciplina: str, serie: str, conteudo: str) -> Dict[str, Any]:
         """Gera árvore de decisão/fluxograma"""
@@ -275,7 +306,7 @@ FORMATO JSON:
   "dica_impressao": "Imprimir em cartolina"
 }}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 2048)
+        return self._chamar_ia(prompt, 4096, cache_type="jogo_memoria")
     
     def gerar_album_figurinhas(self, disciplina: str, serie: str, conteudo: str) -> Dict[str, Any]:
         """Gera álbum de figurinhas educativo"""
@@ -334,7 +365,7 @@ FORMATO JSON:
   "gabarito": "Lista de respostas"
 }}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 2048)
+        return self._chamar_ia(prompt, 4096, cache_type="cruzadinha")
     
     def gerar_bingo_educativo(self, disciplina: str, serie: str, conteudo: str) -> Dict[str, Any]:
         """Gera bingo educativo"""
@@ -432,7 +463,7 @@ FORMATO JSON:
   ]
 }}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 2048)
+        return self._chamar_ia(prompt, 6144, cache_type="roleta_perguntas")
     
     # ==========================================
     # 💙 MATERIAIS PARA TEA/TDAH/DI
@@ -463,7 +494,7 @@ FORMATO JSON:
   "frequencia_uso": "Quando ler com o aluno"
 }}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 2048)
+        return self._chamar_ia(prompt, 4096, cache_type="historia_social")
     
     def gerar_sequenciamento(self, disciplina: str, serie: str, conteudo: str) -> Dict[str, Any]:
         """Gera Sequenciamento Visual - passo a passo de tarefas"""
@@ -550,7 +581,7 @@ FORMATO JSON:
   "dica_impressao": "Plastificar para durabilidade"
 }}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 2048)
+        return self._chamar_ia(prompt, 4096, cache_type="cartoes_comunicacao")
     
     def gerar_termometro_emocoes(self, disciplina: str, serie: str, conteudo: str) -> Dict[str, Any]:
         """Gera Termômetro de Emoções"""
@@ -607,7 +638,7 @@ FORMATO JSON:
   "como_usar": "Aponte como está se sentindo"
 }}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 2048)
+        return self._chamar_ia(prompt, 4096, cache_type="termometro_emocoes")
     
     def gerar_contrato_comportamento(self, disciplina: str, serie: str, conteudo: str) -> Dict[str, Any]:
         """Gera Contrato de Comportamento"""
@@ -658,7 +689,7 @@ FORMATO JSON:
   "recompensa": "Parabéns por completar!"
 }}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 2048)
+        return self._chamar_ia(prompt, 4096, cache_type="checklist_tarefas")
     
     def gerar_painel_primeiro_depois(self, disciplina: str, serie: str, conteudo: str) -> Dict[str, Any]:
         """Gera Painel Primeiro-Depois (First-Then)"""
@@ -707,7 +738,7 @@ FORMATO JSON:
   "gabarito": ["1-termo"]
 }}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 2048)
+        return self._chamar_ia(prompt, 4096, cache_type="complete_lacunas")
     
     def gerar_ligue_colunas(self, disciplina: str, serie: str, conteudo: str) -> Dict[str, Any]:
         """Gera atividade de ligar colunas"""
@@ -754,7 +785,7 @@ FORMATO JSON:
   "dica": "Como pensar na ordem"
 }}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 2048)
+        return self._chamar_ia(prompt, 4096, cache_type="ordenar_sequencia")
     
     # ==========================================
     # 📝 AVALIAÇÕES
@@ -775,7 +806,9 @@ FORMATO JSON:
   "formato_c": {{"titulo": "Roteiro Oral", "questoes": [{{"pergunta": "...", "respostas_aceitas": ["..."]}}]}}
 }}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 4096)
+        # 2026-08-11: 10 + 7 + 5 = ate 22 questoes com alternativas e gabarito
+        # nao cabem em 4096 tokens.
+        return self._chamar_ia(prompt, 8192, cache_type="avaliacao")
     
     # ==========================================
     # 🔬 MATERIAIS PRÁTICOS

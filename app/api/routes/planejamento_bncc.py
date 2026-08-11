@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from typing import Optional, List
 import json
 import asyncio
+import uuid
 from datetime import datetime, timezone
 
 from app.database import get_db
@@ -1191,7 +1192,7 @@ async def listar_componentes_ano(
     return service.listar_componentes_disponiveis(ano_escolar)
 
 
-@router.post("/gerar-planejamento-completo/async")
+@router.post("/gerar-planejamento-completo/async", status_code=202)
 async def iniciar_geracao_planejamento_completo(
     request: GerarPlanejamentoRequest,
     http_request: Request,
@@ -1202,52 +1203,131 @@ async def iniciar_geracao_planejamento_completo(
     """
     Inicia a geração de planejamento COMPLETO em background.
     Gera adaptações para TODAS as habilidades da BNCC do ano escolar.
-    
-    Retorna imediatamente com um task_id para acompanhar o progresso.
-    
+
+    Retorna imediatamente com um task_id para acompanhar o progresso via
+    GET /planejamento/planejamento-completo/job/{task_id}.
+
     ATENÇÃO: Este processo pode demorar vários minutos dependendo da
     quantidade de habilidades e componentes selecionados.
-    
+
     SEGURANCA: rate limited (2/hora - processo MUITO caro) + IDOR check.
+
+    ------------------------------------------------------------------------
+    CORRECAO 2026-08-11 — "Request failed with status code 404"
+    ------------------------------------------------------------------------
+    Antes, esta rota criava apenas a task EM MEMORIA e devolvia o task_id em
+    ~20ms. A linha em `planejamento_jobs` so nascia la dentro de
+    gerar_planejamento_completo() (chamada a _criar_job, depois de carregar o
+    perfil do aluno e listar componentes). Como o frontend faz o primeiro
+    polling imediatamente em
+    GET /planejamento/planejamento-completo/job/{task_id} — que consulta o
+    BANCO — ele sempre chegava antes da linha existir e recebia
+    404 "Job nao encontrado". O erro subia como falha fatal.
+
+    Agora o job e persistido DENTRO do request, antes de devolver o task_id.
+    Se o cliente tem o id, o id e consultavel. Invariante a preservar.
+    ------------------------------------------------------------------------
     """
     check_rate_limit(
         http_request, key="gerar_planejamento_completo", max_requests=2, window_seconds=3600,
         error_message="Limite de planejamentos completos atingido (2/hora). Este processo gera centenas de objetivos e e muito caro. Aguarde 1 hora."
     )
-    
+
     verificar_acesso_aluno(db, request.student_id, current_user)
-    
-    # Criar tarefa
+
+    service = PlanejamentoBNNCCompletoService(db)
+
+    # 409 (e nao 400/500) para job duplicado: o frontend consegue distinguir
+    # "ja existe, reconecte-se a ele" de "deu erro, tente de novo" e recebe o
+    # task_id ativo para retomar o polling em vez de recomecar do zero.
+    job_ativo = service.verificar_job_em_andamento(request.student_id, request.ano_letivo)
+    if job_ativo:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "Ja existe um planejamento em processamento para este aluno.",
+                "task_id": job_ativo.task_id,
+                "progress": job_ativo.progress or 0,
+            },
+        )
+
+    task_id = str(uuid.uuid4())
+
+    # >>> O PULO DO GATO: a linha existe ANTES de o cliente receber o task_id.
+    #     user_id vem do usuario autenticado — antes o job era gravado com
+    #     user_id=0 porque a closure nao repassava current_user.
+    service._criar_job(
+        task_id=task_id,
+        student_id=request.student_id,
+        user_id=current_user.id,
+        ano_letivo=request.ano_letivo,
+        componentes=request.componentes or [],
+    )
+
+    # Criar tarefa em memoria com o MESMO id (espelho para progresso ao vivo)
     task_manager = get_task_manager()
-    task_id = task_manager.create_task()
-    
+    task_manager.create_task(task_id=task_id)
+
+    user_id = current_user.id  # captura antes da closure (a sessao do request morre)
+    student_id = request.student_id
+    ano_letivo = request.ano_letivo
+    componentes = request.componentes
+
     # Função que será executada em background
     async def executar_geracao_completa():
         from app.database import SessionLocal
         db_bg = SessionLocal()
         try:
-            service = PlanejamentoBNNCCompletoService(db_bg)
-            resultado = await service.gerar_planejamento_completo(
-                student_id=request.student_id,
-                ano_letivo=request.ano_letivo,
-                componentes=request.componentes,
+            service_bg = PlanejamentoBNNCCompletoService(db_bg)
+            resultado = await service_bg.gerar_planejamento_completo(
+                student_id=student_id,
+                ano_letivo=ano_letivo,
+                componentes=componentes,
+                user_id=user_id,
                 task_id=task_id,
                 task_manager=task_manager
             )
             return resultado
+        except Exception as e:
+            # Sem isto, uma excecao aqui deixaria o job preso em "pending" e o
+            # frontend em polling infinito ate o timeout de 20 min.
+            logger.exception(
+                "Falha na geracao de planejamento completo",
+                extra={"task_id": task_id, "student_id": student_id},
+            )
+            db_fail = SessionLocal()
+            try:
+                from app.models.planejamento_job import PlanejamentoJob, JobStatus
+                job = db_fail.query(PlanejamentoJob).filter(
+                    PlanejamentoJob.task_id == task_id
+                ).first()
+                if job and job.status not in (JobStatus.COMPLETED.value, JobStatus.FAILED.value):
+                    job.status = JobStatus.FAILED.value
+                    job.ultimo_erro = str(e)[:1000]
+                    job.completed_at = datetime.now(timezone.utc)
+                    db_fail.commit()
+            except Exception:
+                logger.warning("Nao foi possivel marcar o job como failed",
+                               extra={"task_id": task_id}, exc_info=True)
+            finally:
+                db_fail.close()
+            raise
         finally:
             db_bg.close()
-    
+
     # Executar em background
     asyncio.create_task(
         task_manager.run_task(task_id, executar_geracao_completa)
     )
-    
+
     return {
         "task_id": task_id,
-        "message": "Geração de planejamento COMPLETO iniciada. Use /planejamento/task/{task_id} para acompanhar.",
+        "message": "Geração de planejamento COMPLETO iniciada.",
         "status": "pending",
-        "tipo": "planejamento_completo"
+        "tipo": "planejamento_completo",
+        # O servidor dita o ritmo do polling: evita o cliente martelar a API.
+        "poll_interval_ms": 3000,
+        "status_url": f"/api/v1/planejamento/planejamento-completo/job/{task_id}",
     }
 
 

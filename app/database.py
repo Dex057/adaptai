@@ -15,7 +15,12 @@ engine = create_engine(
         "connect_timeout": 60,   # 1 minuto para conectar
         "read_timeout": 60,      # 1 minuto de leitura
         "write_timeout": 60,     # 1 minuto de escrita
-        "charset": "utf8mb4"     # Suporte completo UTF-8
+        "charset": "utf8mb4",    # Suporte completo UTF-8
+        # 2026-08-11: `charset` sozinho nem sempre fixa a collation da sessao —
+        # alguns proxies/DBaaS reabrem a conexao com o default do servidor. Sem
+        # isto, acentos podiam ser gravados/lidos com collation divergente, o
+        # que aparece na UI como "CiÃªncias". Ver docs/CORRECOES-2026-08-11.md.
+        "init_command": "SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci",
     },
     echo=settings.DEBUG
 )

@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from typing import Dict, Any, List, Optional
 from pydantic import BaseModel
 import time
+import json
 
 from app.database import get_db
 from app.api.dependencies import get_current_active_user, verificar_acesso_aluno
@@ -227,16 +228,58 @@ async def gerar_materiais_adaptados(
             print(f"[OK] {config['nome']} gerado!")
             
         except Exception as e:
-            print(f"[ERRO] Gerar {config['nome']}: {type(e).__name__}")
-            # SEGURANCA: nao vazar detalhes de erro interno ao cliente
-            erros.append(f"{config['nome']}: erro na geracao")
+            print(f"[ERRO] Gerar {config['nome']}: {type(e).__name__}: {e}")
+            # 2026-08-11: a mensagem era sempre "erro na geracao", sem nenhuma
+            # pista. Em producao apareceu "Texto em 3 Niveis: erro na geracao"
+            # e nao havia como o professor (nem nos) saber a causa — que era
+            # truncamento no limite de tokens.
+            #
+            # SEGURANCA: continuamos sem vazar stack trace ou detalhe interno.
+            # Classificamos em causas acionaveis e devolvemos so isso.
+            if isinstance(e, ValueError) and "limite de" in str(e):
+                # Truncamento — mensagem ja e segura e orienta o professor.
+                motivo = (
+                    "o conteúdo pedido é longo demais e a resposta foi cortada. "
+                    "Tente um tema mais específico."
+                )
+            elif isinstance(e, json.JSONDecodeError):
+                motivo = "a IA respondeu em um formato inesperado. Tente gerar novamente."
+            else:
+                motivo = "erro na geração. Tente novamente em alguns instantes."
+            erros.append(f"{config['nome']}: {motivo}")
     
     if erros:
         response["erros"] = erros
     
     tempo_total = time.time() - inicio
     response["tempo_geracao"] = round(tempo_total, 2)
-    
+
+    # ------------------------------------------------------------------
+    # 2026-08-11 — NAO SALVAR GERACAO VAZIA
+    # ------------------------------------------------------------------
+    # Antes, o registro era gravado SEMPRE — mesmo quando todos os tipos
+    # falhavam. Isso poluia o historico do aluno com materiais vazios, que
+    # ainda assim contavam nas estatisticas e apareciam em /aluno/materiais
+    # como cards que nao abrem nada.
+    #
+    # Regra: so persiste se pelo menos um tipo foi gerado. Se nada saiu,
+    # devolvemos 422 com a lista de erros — o professor ve o motivo e nada
+    # e gravado.
+    if not response["materiais_gerados"]:
+        print(f"[SKIP] Nenhum material gerado - nada sera salvo. Erros: {erros}")
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "Nenhum material pôde ser gerado.",
+                "erros": erros or ["Falha desconhecida na geração."],
+            },
+        )
+
+    # Tipos que efetivamente entraram no registro (nao os solicitados).
+    # Sem isso, um material com 1 de 3 tipos gerados exibia 3 selos no card
+    # do aluno, dois deles sem conteudo por tras.
+    response["tipos_solicitados"] = request_body.tipos_material
+
     # Salvar no banco
     try:
         material_salvo = MaterialAdaptadoGerado(
@@ -244,7 +287,7 @@ async def gerar_materiais_adaptados(
             disciplina=request_body.disciplina,
             serie=serie,
             conteudo=request_body.conteudo,
-            tipos_material=request_body.tipos_material,
+            tipos_material=response["materiais_gerados"],
             resultado_json=response,
             tempo_geracao=int(tempo_total),
             created_by=current_user.id

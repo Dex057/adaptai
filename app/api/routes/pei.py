@@ -182,7 +182,9 @@ Analise o documento com atenção e extraia todas as informações relevantes pa
         # Chamar Claude com visão
         message = client.messages.create(
             model=MODELO_VISAO,  # Modelo que suporta PDF/imagens
-            max_tokens=4096,
+            # 2026-08-11: laudos de neuropsicologia passam facil de 4096 tokens
+            # de saida estruturada. Truncava em silencio e o PEI herdava o vazio.
+            max_tokens=8192,
             messages=[
                 {
                     "role": "user",
@@ -226,18 +228,53 @@ Analise o documento com atenção e extraia todas as informações relevantes pa
             response_text = response_text[:-3]
         response_text = response_text.strip()
         
-        try:
-            dados_extraidos = json.loads(response_text)
-        except json.JSONDecodeError:
-            # Se não conseguir fazer parse, retornar o texto bruto
+        # 2026-08-11: mesmo problema do endpoint de gerar PEI — o laudo
+        # truncado virava "sucesso" com um objeto vazio, e esse objeto vazio
+        # era justamente o que alimentava o PEI depois. Um laudo mal extraido
+        # aqui produz um PEI vazio la na frente, sem nenhum aviso no caminho.
+        stop_reason = getattr(message, "stop_reason", None)
+        parse_ok = True
+
+        if stop_reason == "max_tokens":
+            logger.error(
+                "Analise de laudo truncada no limite de tokens",
+                extra={"arquivo": arquivo.filename, "tamanho": len(response_text)},
+            )
+            parse_ok = False
             dados_extraidos = {
                 "erro_parse": True,
                 "texto_bruto": response_text,
-                "mensagem": "Não foi possível estruturar os dados automaticamente"
+                "mensagem": (
+                    "O laudo é longo demais e a extração foi cortada. "
+                    "Os campos abaixo podem estar incompletos — revise antes de salvar."
+                ),
             }
-        
+        else:
+            try:
+                dados_extraidos = json.loads(response_text)
+            except json.JSONDecodeError:
+                # Aqui o texto bruto AINDA e util: o professor consegue ler e
+                # preencher a mao. Por isso nao levantamos erro — mas
+                # sinalizamos com success=False para a UI avisar.
+                logger.warning(
+                    "Laudo nao pode ser estruturado automaticamente",
+                    extra={"arquivo": arquivo.filename},
+                )
+                parse_ok = False
+                dados_extraidos = {
+                    "erro_parse": True,
+                    "texto_bruto": response_text,
+                    "mensagem": (
+                        "Não foi possível estruturar os dados automaticamente. "
+                        "O texto extraído está abaixo para preenchimento manual."
+                    ),
+                }
+
         return {
-            "success": True,
+            # success reflete o que REALMENTE aconteceu. O frontend precisa
+            # saber que os campos vieram vazios antes de o professor gerar um
+            # PEI em cima de nada.
+            "success": parse_ok,
             "dados": dados_extraidos,
             "arquivo_nome": arquivo.filename,
             "arquivo_tipo": content_type,
@@ -417,9 +454,13 @@ Retorne APENAS o JSON, sem explicações adicionais."""
             extra={"student_id": student_id, "relatorios": len(relatorios_dados)}
         )
 
+        # 2026-08-11: 8000 nao comportava um PEI completo (dados do aluno +
+        # diagnosticos + objetivos por area + estrategias + adaptacoes), ainda
+        # mais com o texto de um laudo extenso no contexto. O JSON vinha
+        # cortado e caia no fallback de parse — que devolvia "sucesso".
         message = client.messages.create(
             model=MODELO_PEI_TEXTO,
-            max_tokens=8000,
+            max_tokens=16000,
             messages=[
                 {
                     "role": "user",
@@ -444,15 +485,67 @@ Retorne APENAS o JSON, sem explicações adicionais."""
             response_text = response_text.replace(marker, "")
         response_text = response_text.strip()
 
+        # ------------------------------------------------------------------
+        # CORRECAO 2026-08-11 — "PEI parcial, sem preenchimento"
+        # ------------------------------------------------------------------
+        # O fluxo antigo era:
+        #
+        #   except json.JSONDecodeError:
+        #       pei_gerado = {"erro_parse": True, "texto_bruto": ...}
+        #   return {"success": True, "pei": pei_gerado}   # <-- MENTIA
+        #
+        # Ou seja: quando o JSON vinha truncado, a rota respondia SUCESSO com
+        # um objeto que nao tem NENHUM dos campos do PEI. O frontend exibia
+        # "PEI gerado com sucesso!" e abria o formulario vazio — exatamente o
+        # "PEI parcial sem informacoes" relatado.
+        #
+        # Agora: truncamento e detectado, e falha e reportada COMO falha.
+        stop_reason = getattr(message, "stop_reason", None)
+        if stop_reason == "max_tokens":
+            logger.error(
+                "PEI truncado no limite de tokens",
+                extra={"student_id": student_id, "tamanho": len(response_text)},
+            )
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "O PEI ficou grande demais para ser gerado de uma vez — a resposta "
+                    "foi cortada. Selecione menos relatórios e gere novamente."
+                ),
+            )
+
         try:
             pei_gerado = json.loads(response_text)
         except json.JSONDecodeError:
-            logger.warning("PEI gerado nao retornou JSON valido")
-            pei_gerado = {
-                "erro_parse": True,
-                "texto_bruto": response_text,
-                "mensagem": "Não foi possível estruturar o PEI automaticamente"
-            }
+            logger.warning(
+                "PEI gerado nao retornou JSON valido",
+                extra={"student_id": student_id, "preview": response_text[:300]},
+            )
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "A IA respondeu em um formato inesperado e o PEI não pôde ser "
+                    "montado. Tente gerar novamente."
+                ),
+            )
+
+        # Rede de seguranca: JSON valido, porem sem os campos essenciais.
+        # Melhor avisar agora do que abrir um formulario vazio.
+        if not isinstance(pei_gerado, dict) or not any(
+            pei_gerado.get(campo) for campo in ("objetivos", "areas", "diagnosticos", "resumo")
+        ):
+            logger.warning(
+                "PEI gerado sem campos essenciais",
+                extra={"student_id": student_id, "chaves": list(pei_gerado)[:10]
+                       if isinstance(pei_gerado, dict) else None},
+            )
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "O PEI foi gerado sem as informações esperadas. Verifique se os "
+                    "relatórios selecionados já foram analisados e tente novamente."
+                ),
+            )
 
         return {
             "success": True,

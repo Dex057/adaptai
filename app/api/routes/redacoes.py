@@ -33,6 +33,10 @@ from app.core.rate_limit import check_rate_limit
 
 router = APIRouter(prefix="/redacoes", tags=["Redações ENEM"])
 
+# Marcador de build deste modulo — exposto em GET /redacoes/_build.
+# Atualize a data quando mexer em algo relevante aqui.
+BUILD_REDACOES = "2026-08-13-case-fix+escopo-escola"
+
 
 # ============================================
 # ESCOPO MULTI-TENANT DOS TEMAS
@@ -225,11 +229,29 @@ async def criar_tema_manual(
     return novo_tema
 
 
+@router.get("/_build")
+def build_do_modulo_redacoes():
+    """
+    Marcador de build deste modulo. SEM autenticacao de proposito: nao devolve
+    nenhum dado, so uma string fixa.
+
+    Serve para responder em 2 segundos a pergunta que travou o debug desta rota:
+    "o servidor que estou batendo esta rodando o codigo corrigido, ou um processo
+    antigo que subiu antes do arquivo mudar?"
+
+    Abra no navegador:  <host>/api/v1/redacoes/_build
+      - 404          -> servidor antigo, nao tem esta rota. RESTART obrigatorio.
+      - build != o valor abaixo -> deploy/reload nao pegou.
+    """
+    return {"modulo": "redacoes", "build": BUILD_REDACOES}
+
+
 @router.get("/temas")
 def listar_temas(
     pagination: PaginationParams = Depends(),
     skip: int = None,
     limit: int = None,
+    debug: bool = False,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -245,86 +267,111 @@ def listar_temas(
     
     Resposta: {items, meta, total, temas} - frontend novo usa items, antigo usa array na raiz
     """
-    # Compat: se passou skip/limit, calcular page/size equivalentes
-    if skip is not None or limit is not None:
-        real_skip = skip or 0
-        real_limit = min(limit or 50, 100)
-        real_page = (real_skip // real_limit) + 1 if real_limit > 0 else 1
-        # Sobrescrever pagination
-        pagination.page = real_page
-        pagination.size = real_limit
+    # -------------------------------------------------------------------
+    # CORRECAO 2026-08-13 — 500 opaco nesta rota
+    # -------------------------------------------------------------------
+    # Excecao nao tratada aqui vira 500 do ServerErrorMiddleware, que roda POR
+    # FORA do CORSMiddleware: a resposta sai sem cabecalho CORS, o navegador a
+    # bloqueia, e o axios recebe "Network Error" sem `error.response`. Resultado
+    # pratico: o DevTools mostra 500 com 0 bytes e o front so consegue dizer
+    # "nao foi possivel falar com o servidor" — o erro real fica invisivel.
+    #
+    # Convertendo para HTTPException, a resposta volta a passar pelo CORS e o
+    # front consegue exibir o `detail`. Com `?debug=1` o `detail` traz tipo e
+    # mensagem da excecao (o front reenvia com debug=1 automaticamente quando a
+    # primeira tentativa falha). Sem debug, mensagem generica — a regra de nao
+    # vazar erro interno continua valendo para o trafego normal.
+    try:
+        # Compat: se passou skip/limit, calcular page/size equivalentes
+        if skip is not None or limit is not None:
+            real_skip = skip or 0
+            real_limit = min(limit or 50, 100)
+            real_page = (real_skip // real_limit) + 1 if real_limit > 0 else 1
+            # Sobrescrever pagination
+            pagination.page = real_page
+            pagination.size = real_limit
     
-    # Escopo multi-tenant: ver bloco no topo do arquivo. Antes desta linha, o
-    # filtro era so `ativo == True` — todo professor via os temas de todas as
-    # escolas da base.
-    query = _escopo_temas(
-        db.query(TemaRedacao).filter(TemaRedacao.ativo == True), current_user
-    ).order_by(TemaRedacao.criado_em.desc())
+        # Escopo multi-tenant: ver bloco no topo do arquivo. Antes desta linha, o
+        # filtro era so `ativo == True` — todo professor via os temas de todas as
+        # escolas da base.
+        query = _escopo_temas(
+            db.query(TemaRedacao).filter(TemaRedacao.ativo == True), current_user
+        ).order_by(TemaRedacao.criado_em.desc())
 
-    total = query.count()
-    temas = query.offset(pagination.offset).limit(pagination.limit).all()
+        total = query.count()
+        temas = query.offset(pagination.offset).limit(pagination.limit).all()
     
-    # Evitar N+1: calcular contadores em uma query agregada
-    #
-    # -------------------------------------------------------------------
-    # CORRECAO 2026-08-13 — "gerei o tema, mas ele nao aparece em /redacoes"
-    # -------------------------------------------------------------------
-    # Era `func.case((cond, 1), else_=0)`. `case` NAO e uma funcao SQL: e um
-    # construtor do proprio SQLAlchemy (`sqlalchemy.case`). Passar por `func.`
-    # tenta montar uma Function chamada "case", e o kwarg `else_` estoura antes
-    # mesmo de gerar SQL:
-    #     TypeError: Function.__init__() got an unexpected keyword argument 'else_'
-    #
-    # O detalhe que escondeu o bug: este bloco so roda `if tema_ids`. Com a base
-    # vazia, GET /redacoes/temas respondia 200 com lista vazia — parecia normal.
-    # A partir do PRIMEIRO tema salvo, todo GET /redacoes/temas passava a estourar
-    # 500. Ou seja: o tema era gravado (o POST /gerar-tema commita certo), mas a
-    # tela que o exibiria nunca mais carregava. Sintoma relatado: "o tema nao
-    # esta salvando pra mim".
-    #
-    # Alem de trocar para o `case` correto, os contadores agora sao best-effort:
-    # eles sao informacao SECUNDARIA (quantas redacoes/corrigidas por tema). Se a
-    # agregacao falhar por qualquer motivo, a lista de temas — que e o dado
-    # primario da tela — continua sendo entregue, com contadores zerados.
-    tema_ids = [t.id for t in temas]
-    contadores = {}
-    if tema_ids:
-        try:
-            rows = (
-                db.query(
-                    RedacaoAluno.tema_id,
-                    func.count(RedacaoAluno.id).label("total"),
-                    func.sum(
-                        case((RedacaoAluno.status == StatusRedacao.CORRIGIDA, 1), else_=0)
-                    ).label("corrigidas"),
+        # Evitar N+1: calcular contadores em uma query agregada
+        #
+        # -------------------------------------------------------------------
+        # CORRECAO 2026-08-13 — "gerei o tema, mas ele nao aparece em /redacoes"
+        # -------------------------------------------------------------------
+        # Era `func.case((cond, 1), else_=0)`. `case` NAO e uma funcao SQL: e um
+        # construtor do proprio SQLAlchemy (`sqlalchemy.case`). Passar por `func.`
+        # tenta montar uma Function chamada "case", e o kwarg `else_` estoura antes
+        # mesmo de gerar SQL:
+        #     TypeError: Function.__init__() got an unexpected keyword argument 'else_'
+        #
+        # O detalhe que escondeu o bug: este bloco so roda `if tema_ids`. Com a base
+        # vazia, GET /redacoes/temas respondia 200 com lista vazia — parecia normal.
+        # A partir do PRIMEIRO tema salvo, todo GET /redacoes/temas passava a estourar
+        # 500. Ou seja: o tema era gravado (o POST /gerar-tema commita certo), mas a
+        # tela que o exibiria nunca mais carregava. Sintoma relatado: "o tema nao
+        # esta salvando pra mim".
+        #
+        # Alem de trocar para o `case` correto, os contadores agora sao best-effort:
+        # eles sao informacao SECUNDARIA (quantas redacoes/corrigidas por tema). Se a
+        # agregacao falhar por qualquer motivo, a lista de temas — que e o dado
+        # primario da tela — continua sendo entregue, com contadores zerados.
+        tema_ids = [t.id for t in temas]
+        contadores = {}
+        if tema_ids:
+            try:
+                rows = (
+                    db.query(
+                        RedacaoAluno.tema_id,
+                        func.count(RedacaoAluno.id).label("total"),
+                        func.sum(
+                            case((RedacaoAluno.status == StatusRedacao.CORRIGIDA, 1), else_=0)
+                        ).label("corrigidas"),
+                    )
+                    .filter(RedacaoAluno.tema_id.in_(tema_ids))
+                    .group_by(RedacaoAluno.tema_id)
+                    .all()
                 )
-                .filter(RedacaoAluno.tema_id.in_(tema_ids))
-                .group_by(RedacaoAluno.tema_id)
-                .all()
-            )
-            for tema_id, total_, corrigidas in rows:
-                contadores[tema_id] = (total_ or 0, int(corrigidas or 0))
-        except Exception as e:
-            print(f"[AVISO] Contadores de redacao indisponiveis (lista segue): {e}")
-            contadores = {}
+                for tema_id, total_, corrigidas in rows:
+                    contadores[tema_id] = (total_ or 0, int(corrigidas or 0))
+            except Exception as e:
+                print(f"[AVISO] Contadores de redacao indisponiveis (lista segue): {e}")
+                contadores = {}
 
-    items = []
-    for tema in temas:
-        total_redacoes, total_corrigidas = contadores.get(tema.id, (0, 0))
-        items.append({
-            "id": tema.id,
-            "titulo": tema.titulo,
-            "area_tematica": tema.area_tematica,
-            "nivel_dificuldade": tema.nivel_dificuldade,
-            "criado_em": tema.criado_em,
-            "total_redacoes": total_redacoes,
-            "total_corrigidas": total_corrigidas
-        })
+        items = []
+        for tema in temas:
+            total_redacoes, total_corrigidas = contadores.get(tema.id, (0, 0))
+            items.append({
+                "id": tema.id,
+                "titulo": tema.titulo,
+                "area_tematica": tema.area_tematica,
+                "nivel_dificuldade": tema.nivel_dificuldade,
+                "criado_em": tema.criado_em,
+                "total_redacoes": total_redacoes,
+                "total_corrigidas": total_corrigidas
+            })
     
-    page = build_page(items=items, total=total, pagination=pagination)
-    page["total"] = total
-    page["temas"] = items
-    return page
+        page = build_page(items=items, total=total, pagination=pagination)
+        page["total"] = total
+        page["temas"] = items
+        return page
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        detalhe = (
+            f"{type(e).__name__}: {e}" if debug
+            else "Não foi possível listar os temas de redação."
+        )
+        raise HTTPException(status_code=500, detail=detalhe)
 
 
 @router.get("/temas/{tema_id}", response_model=TemaRedacaoResponse)

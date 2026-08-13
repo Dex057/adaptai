@@ -1280,6 +1280,46 @@ async def iniciar_geracao_planejamento_completo(
 
     service = PlanejamentoBNNCCompletoService(db)
 
+    # ------------------------------------------------------------------
+    # 2026-08-11 — LIMPEZA DE JOBS ORFAOS
+    # ------------------------------------------------------------------
+    # Antes da correcao do run_task (kwargs injetados numa closure que nao os
+    # aceitava), TODA geracao morria antes de comecar e deixava a linha presa
+    # em 'pending'/'processing'. Esses restos bloqueiam novas geracoes pelo
+    # `verificar_job_em_andamento` e fazem o cliente reconectar a um job que
+    # nunca vai terminar.
+    #
+    # Em vez de exigir um UPDATE manual no banco, a propria rota reconcilia:
+    # job parado ha mais de 15 minutos sem resultado nunca vai concluir.
+    try:
+        from app.models.planejamento_job import PlanejamentoJob, JobStatus as _JS
+
+        limite = datetime.now(timezone.utc) - timedelta(minutes=15)
+        orfaos = (
+            db.query(PlanejamentoJob)
+            .filter(
+                PlanejamentoJob.student_id == request.student_id,
+                PlanejamentoJob.status.in_([_JS.PENDING.value, _JS.PROCESSING.value]),
+                PlanejamentoJob.resultado_final.is_(None),
+                PlanejamentoJob.created_at < limite,
+            )
+            .all()
+        )
+        for orfao in orfaos:
+            orfao.status = _JS.FAILED.value
+            orfao.ultimo_erro = "Job interrompido - liberado automaticamente."
+            orfao.completed_at = datetime.now(timezone.utc)
+        if orfaos:
+            db.commit()
+            logger.info(
+                "Jobs orfaos de planejamento liberados",
+                extra={"student_id": request.student_id, "quantidade": len(orfaos)},
+            )
+    except Exception:
+        # Limpeza e best-effort: nunca deve impedir uma geracao nova.
+        logger.warning("Falha ao limpar jobs orfaos", exc_info=True)
+        db.rollback()
+
     # 409 (e nao 400/500) para job duplicado: o frontend consegue distinguir
     # "ja existe, reconecte-se a ele" de "deu erro, tente de novo" e recebe o
     # task_id ativo para retomar o polling em vez de recomecar do zero.

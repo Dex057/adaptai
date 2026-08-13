@@ -112,6 +112,14 @@ async def gerar_tema_com_ia(
         
     except HTTPException:
         raise
+    except ValueError as e:
+        # 2026-08-11: o `except Exception` abaixo transformava TUDO em "Erro ao
+        # gerar tema. Tente novamente." — inclusive o truncamento por limite de
+        # tokens, que tem causa conhecida e acao clara. O ValueError levantado
+        # por redacao_ai_service ja carrega uma mensagem segura e util (nao
+        # expoe stack nem detalhe interno), entao propagamos como 422.
+        print(f"[ERRO] Tema de redacao nao pode ser montado: {e}")
+        raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
         # SEGURANCA: nao vazar mensagem de erro interna
         print(f"[ERRO] Erro ao gerar tema: {e}")

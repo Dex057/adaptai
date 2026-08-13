@@ -107,10 +107,127 @@ class MaterialAdaptadoService:
         
         return parsed
     
+    # ==========================================================================
+    # ADAPTACAO POR PERFIL DO ALUNO — 2026-08-11
+    # ==========================================================================
+    # Achado que originou este bloco: os metodos `gerar_texto_3_niveis`,
+    # `gerar_historia_social` e `gerar_avaliacao_multiformato` RECEBIAM o
+    # parametro `diagnosticos` e simplesmente NAO o usavam — nenhum prompt do
+    # arquivo interpolava esse dado. Na pratica, "Materiais Adaptados" entregava
+    # material por serie, identico para alunos de perfis opostos.
+    #
+    # Agravante: o cache tem TTL de 7 dias e a chave e o hash do prompt. Como o
+    # diagnostico nao entrava no prompt, um aluno com deficiencia intelectual e
+    # um com superdotacao recebiam A MESMA LINHA do cache.
+    #
+    # `_contexto_aluno` traduz o diagnostico em orientacoes CONCRETAS de
+    # escrita. Nao e um rotulo colado no prompt ("aluno com TEA") — sao
+    # instrucoes acionaveis, porque rotulo diagnostico sozinho leva o modelo a
+    # estereotipar em vez de adaptar.
+
+    @staticmethod
+    def _contexto_aluno(diagnosticos: Dict[str, Any]) -> str:
+        """
+        Converte o diagnostico do aluno em orientacoes de escrita para o prompt.
+
+        Devolve string vazia quando nao ha diagnostico — assim o material segue
+        generico por serie, como antes, sem custo extra de tokens.
+        """
+        if not diagnosticos or not isinstance(diagnosticos, dict):
+            return ""
+
+        regras: List[str] = []
+
+        # --- Deficiencia intelectual -----------------------------------------
+        # Base: linguagem simples (Easy-to-Read), uma ideia por frase, apoio
+        # concreto e repeticao espacada. E o perfil que mais depende de
+        # adaptacao textual e o que estava mais desassistido.
+        if diagnosticos.get("deficiencia_intelectual"):
+            regras += [
+                "Use frases de no maximo 12 palavras, UMA ideia por frase.",
+                "Vocabulario do cotidiano; se um termo tecnico for indispensavel, "
+                "explique-o na mesma frase com exemplo concreto.",
+                "Prefira voz ativa e ordem direta (sujeito-verbo-objeto).",
+                "Ancore cada conceito abstrato em um exemplo do dia a dia do aluno "
+                "(casa, escola, mercado, transporte).",
+                "Repita os termos-chave ao longo do texto em vez de trocar por sinonimos.",
+                "Divida qualquer processo em passos numerados e curtos.",
+                "Evite metaforas, ironia, duplas negativas e frases condicionais encadeadas.",
+            ]
+
+        if diagnosticos.get("tea"):
+            nivel = str(diagnosticos.get("tea_nivel") or "").strip()
+            regras += [
+                "Linguagem literal e concreta: sem metaforas, ironia ou sentido figurado.",
+                "Estrutura previsivel e explicita, com comeco/meio/fim sinalizados.",
+                "Antecipe mudancas de assunto com uma frase de transicao.",
+            ]
+            if nivel in {"2", "3"}:
+                regras.append(
+                    "Nivel de suporte alto: frases muito curtas, apoio visual em cada "
+                    "etapa e instrucoes de um comando por vez."
+                )
+
+        if diagnosticos.get("tdah"):
+            regras += [
+                "Blocos curtos, com titulo proprio, para sustentar a atencao.",
+                "Destaque o essencial no inicio de cada bloco (mais importante primeiro).",
+                "Evite paredes de texto: no maximo 4 linhas por paragrafo.",
+            ]
+
+        if diagnosticos.get("dislexia"):
+            regras += [
+                "Frases curtas e diretas; evite palavras longas e pouco frequentes.",
+                "Separe silabas de termos dificeis na primeira ocorrencia (ex: fo-tos-sin-te-se).",
+                "Nao use texto em CAIXA ALTA nem blocos em italico.",
+            ]
+
+        if diagnosticos.get("discalculia"):
+            regras += [
+                "Apresente numeros sempre com apoio concreto e unidade explicita.",
+                "Quebre calculos em etapas visiveis; evite varias operacoes na mesma frase.",
+            ]
+
+        if diagnosticos.get("disgrafia"):
+            regras += [
+                "Prefira atividades de marcar/ligar/escolher a atividades de escrita extensa.",
+                "Quando exigir escrita, limite a respostas de ate uma frase.",
+            ]
+
+        if diagnosticos.get("superdotacao"):
+            regras += [
+                "Inclua ao menos uma extensao de aprofundamento por secao.",
+                "Proponha uma pergunta aberta que conecte o tema a outra area do conhecimento.",
+            ]
+
+        # Texto livre do perfil: informacao do professor sobre ESTE aluno.
+        extras = []
+        for campo, rotulo in (
+            ("caracteristicas", "Caracteristicas"),
+            ("pontos_fortes", "Pontos fortes (use como ponte de entrada no conteudo)"),
+            ("dificuldades", "Dificuldades (reforce com apoio extra)"),
+        ):
+            valor = str(diagnosticos.get(campo) or "").strip()
+            if valor:
+                extras.append(f"- {rotulo}: {valor}")
+
+        if not regras and not extras:
+            return ""
+
+        bloco = "\n\nADAPTACOES OBRIGATORIAS PARA ESTE ALUNO:\n"
+        bloco += "\n".join(f"- {r}" for r in regras)
+        if extras:
+            bloco += "\n\nPERFIL INFORMADO PELO PROFESSOR:\n" + "\n".join(extras)
+        bloco += (
+            "\n\nAplique estas adaptacoes ao CONTEUDO, sem mencionar diagnosticos "
+            "no material — o aluno nao deve ler sobre a propria condicao."
+        )
+        return bloco
+
     # ==========================================
     # 📚 MATERIAIS DE LEITURA
     # ==========================================
-    
+
     def gerar_texto_3_niveis(self, disciplina: str, serie: str, conteudo: str, diagnosticos: Dict[str, Any]) -> Dict[str, Any]:
         """Gera texto adaptado em 3 níveis de complexidade"""
         prompt = f"""Criar texto sobre "{conteudo}" ({disciplina}, {serie}) em 3 NÍVEIS:
@@ -120,7 +237,7 @@ AVANÇADO: Texto acadêmico completo.
 
 FORMATO JSON:
 {{"basico": "texto", "intermediario": "texto", "avancado": "texto", "vocabulario": {{"termo": "definição"}}}}
-Retorne APENAS o JSON."""
+Retorne APENAS o JSON.{self._contexto_aluno(diagnosticos)}"""
         return self._chamar_ia(prompt, 8192, cache_type="texto_3_niveis")
     
     def gerar_resumo_estruturado(self, disciplina: str, serie: str, conteudo: str) -> Dict[str, Any]:
@@ -493,7 +610,7 @@ FORMATO JSON:
   "dica_professor": "Como usar esta história",
   "frequencia_uso": "Quando ler com o aluno"
 }}
-Retorne APENAS o JSON."""
+Retorne APENAS o JSON.{self._contexto_aluno(diagnosticos or {})}"""
         return self._chamar_ia(prompt, 4096, cache_type="historia_social")
     
     def gerar_sequenciamento(self, disciplina: str, serie: str, conteudo: str) -> Dict[str, Any]:
@@ -805,7 +922,10 @@ FORMATO JSON:
   "formato_b": {{"titulo": "Avaliação Adaptada", "questoes": [...], "adaptacoes": "Tempo estendido"}},
   "formato_c": {{"titulo": "Roteiro Oral", "questoes": [{{"pergunta": "...", "respostas_aceitas": ["..."]}}]}}
 }}
-Retorne APENAS o JSON."""
+Retorne APENAS o JSON.{self._contexto_aluno(diagnosticos)}
+
+O FORMATO B deve refletir as adaptacoes acima de forma concreta — nao basta
+reduzir a quantidade de questoes. Descreva em "adaptacoes" o que mudou e por que."""
         # 2026-08-11: 10 + 7 + 5 = ate 22 questoes com alternativas e gabarito
         # nao cabem em 4096 tokens.
         return self._chamar_ia(prompt, 8192, cache_type="avaliacao")

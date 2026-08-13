@@ -210,13 +210,50 @@ class BackgroundTaskManager:
                 progress=0,
                 message="Iniciando processamento...",
             )
-            
-            result = await func(
-                *args,
-                task_id=task_id,
-                task_manager=self,
-                **kwargs,
-            )
+
+            # ------------------------------------------------------------------
+            # CORRECAO 2026-08-11 — geracao ficava eternamente em "pending"
+            # ------------------------------------------------------------------
+            # Antes, os kwargs task_id/task_manager eram injetados SEMPRE:
+            #
+            #     result = await func(*args, task_id=task_id, task_manager=self)
+            #
+            # Mas as tres closures que chamam run_task em planejamento_bncc.py
+            # (`executar_geracao`, `executar_retomada`,
+            # `executar_geracao_completa`) sao declaradas SEM parametros —
+            # elas ja capturam tudo por closure. Resultado:
+            #
+            #     TypeError: executar_geracao_completa() got an unexpected
+            #                keyword argument 'task_id'
+            #
+            # A excecao caia no `except` abaixo, que marca FAILED na tabela
+            # `background_tasks` — mas o frontend faz polling em
+            # `planejamento_jobs`, que continuava em "pending / Job criado,
+            # aguardando inicio" PARA SEMPRE. Nenhum erro chegava ao professor.
+            #
+            # Agora inspecionamos a assinatura e injetamos apenas o que a
+            # funcao realmente aceita. Funcoes que declaram os parametros (ou
+            # **kwargs) continuam recebendo; as que nao declaram, nao quebram.
+            import inspect
+
+            injetaveis = {"task_id": task_id, "task_manager": self}
+            try:
+                assinatura = inspect.signature(func)
+                aceita_var_kw = any(
+                    p.kind is inspect.Parameter.VAR_KEYWORD
+                    for p in assinatura.parameters.values()
+                )
+                if not aceita_var_kw:
+                    injetaveis = {
+                        nome: valor
+                        for nome, valor in injetaveis.items()
+                        if nome in assinatura.parameters
+                    }
+            except (TypeError, ValueError):
+                # Callable sem assinatura introspectavel: nao injeta nada.
+                injetaveis = {}
+
+            result = await func(*args, **injetaveis, **kwargs)
             
             self.update_task(
                 task_id,

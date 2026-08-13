@@ -9,7 +9,7 @@ from typing import Optional, List
 import json
 import asyncio
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from app.database import get_db
 from app.api.dependencies import (
@@ -92,7 +92,11 @@ async def iniciar_geracao_planejamento(
     task_id = task_manager.create_task()
     
     # Função que será executada em background
-    async def executar_geracao():
+    async def executar_geracao(**_injetados):
+        # run_task injeta task_id/task_manager como kwargs. Ja temos os
+        # dois por closure, entao aceitamos e ignoramos — mas a
+        # assinatura PRECISA aceitar, senao levanta TypeError e o job
+        # fica preso em 'pending' (ver background_tasks.run_task).
         # Criar nova sessão para a tarefa em background
         from app.database import SessionLocal
         db_bg = SessionLocal()
@@ -571,10 +575,45 @@ async def obter_job_detalhado(
     
     if not job:
         raise HTTPException(status_code=404, detail="Job não encontrado")
-    
+
     # IDOR: verifica acesso ao aluno dono do job
     verificar_acesso_aluno(db, job.student_id, current_user)
-    
+
+    # ------------------------------------------------------------------
+    # 2026-08-11 — DETECCAO DE JOB ABANDONADO
+    # ------------------------------------------------------------------
+    # Se o worker morre antes de tocar o job (crash, restart do Railway,
+    # excecao na assinatura da closure), a linha fica em "pending" para
+    # sempre e o frontend faz polling ate o timeout de 20 minutos sem
+    # nenhuma explicacao ao professor.
+    #
+    # Aqui reconciliamos: job PENDING sem progresso ha mais de 3 minutos
+    # e um job que nunca comecou. Marcamos como failed com uma mensagem
+    # util, para o polling terminar e o erro aparecer na tela.
+    from app.models.planejamento_job import JobStatus as _JobStatus
+
+    LIMITE_PENDING_MIN = 3
+    if job.status == _JobStatus.PENDING.value and not job.started_at:
+        criado = job.created_at
+        if criado:
+            if criado.tzinfo is None:
+                criado = criado.replace(tzinfo=timezone.utc)
+            parado_ha = datetime.now(timezone.utc) - criado
+            if parado_ha > timedelta(minutes=LIMITE_PENDING_MIN):
+                logger.error(
+                    "Job de planejamento abandonado em pending",
+                    extra={"task_id": task_id, "minutos": parado_ha.total_seconds() / 60},
+                )
+                job.status = _JobStatus.FAILED.value
+                job.ultimo_erro = (
+                    "A geração não chegou a iniciar no servidor. "
+                    "Tente novamente; se persistir, verifique se a chave da IA "
+                    "está configurada."
+                )
+                job.completed_at = datetime.now(timezone.utc)
+                db.commit()
+                db.refresh(job)
+
     # Buscar logs
     logs = db.query(PlanejamentoJobLog).filter(
         PlanejamentoJobLog.job_id == job.id
@@ -651,7 +690,11 @@ async def retomar_job(
     task_manager = get_task_manager()
     new_task_id = task_manager.create_task()
     
-    async def executar_retomada():
+    async def executar_retomada(**_injetados):
+        # run_task injeta task_id/task_manager como kwargs. Ja temos os
+        # dois por closure, entao aceitamos e ignoramos — mas a
+        # assinatura PRECISA aceitar, senao levanta TypeError e o job
+        # fica preso em 'pending' (ver background_tasks.run_task).
         from app.database import SessionLocal
         db_bg = SessionLocal()
         try:
@@ -1274,7 +1317,11 @@ async def iniciar_geracao_planejamento_completo(
     componentes = request.componentes
 
     # Função que será executada em background
-    async def executar_geracao_completa():
+    async def executar_geracao_completa(**_injetados):
+        # run_task injeta task_id/task_manager como kwargs. Ja temos os
+        # dois por closure, entao aceitamos e ignoramos — mas a
+        # assinatura PRECISA aceitar, senao levanta TypeError e o job
+        # fica preso em 'pending' (ver background_tasks.run_task).
         from app.database import SessionLocal
         db_bg = SessionLocal()
         try:

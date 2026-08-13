@@ -71,16 +71,50 @@ class ProvaAIService:
             dificuldade=dificuldade
         )
         
+        # ------------------------------------------------------------------
+        # CORRECAO 2026-08-11 — "Erro ao criar prova" em provas dissertativas
+        # ------------------------------------------------------------------
+        # O teto era `max_tokens=4000` FIXO, independente do tipo e da
+        # quantidade. Uma questao de multipla escolha ocupa ~150 tokens; uma
+        # dissertativa carrega enunciado + resposta esperada + criterios de
+        # avaliacao e passa de 350. Dez dissertativas nao cabiam em 4000: o
+        # JSON vinha cortado, o parse falhava, e o retry disparava mais DUAS
+        # chamadas com o MESMO teto — falha garantida, credito gasto 3x, e o
+        # professor via so "Erro ao criar prova. Tente novamente."
+        max_tokens = self._calcular_max_tokens(quantidade, tipo_questao)
+
         ultimo_erro = None
         for tentativa in range(1, self.max_retries + 1):
             try:
                 message = self.client.messages.create(
                     model=self.model,
-                    max_tokens=4000,
+                    max_tokens=max_tokens,
                     temperature=0.7,
                     timeout=self.timeout_seconds,
                     messages=[{"role": "user", "content": prompt}],
                 )
+
+                # Truncamento nao se resolve tentando de novo com o mesmo teto.
+                # Detectamos, subimos o teto e so entao reenviamos.
+                if getattr(message, "stop_reason", None) == "max_tokens":
+                    logger.error(
+                        "Geracao de questoes truncada no limite de tokens",
+                        extra={
+                            "max_tokens": max_tokens,
+                            "quantidade": quantidade,
+                            "tipo": getattr(tipo_questao, "value", str(tipo_questao)),
+                            "tentativa": tentativa,
+                        },
+                    )
+                    if tentativa < self.max_retries and max_tokens < self.MAX_TOKENS_TETO:
+                        max_tokens = min(max_tokens * 2, self.MAX_TOKENS_TETO)
+                        continue
+                    raise ProvaIAError(
+                        f"A resposta da IA foi cortada: {quantidade} questões deste "
+                        f"tipo são longas demais para uma única geração. "
+                        f"Reduza a quantidade de questões e tente novamente."
+                    )
+
                 resposta = message.content[0].text
                 questoes = self._parse_questoes_json(resposta)
 
@@ -104,10 +138,45 @@ class ProvaAIService:
                 logger.exception("Erro inesperado ao gerar questoes com IA")
                 break
 
+        # Preserva a mensagem util quando ja temos uma (ex.: truncamento).
+        # Antes, qualquer causa virava o mesmo texto generico e o professor
+        # nao tinha o que fazer com a informacao.
+        if isinstance(ultimo_erro, ProvaIAError) and str(ultimo_erro):
+            raise ultimo_erro
+
         raise ProvaIAError(
             "Não foi possível gerar as questões com a IA após várias tentativas. "
             "Tente novamente em instantes."
         ) from ultimo_erro
+
+    # Teto absoluto por chamada — acima disso, o caminho certo e reduzir a
+    # quantidade de questoes, nao insistir numa resposta gigante.
+    MAX_TOKENS_TETO = 16000
+
+    @staticmethod
+    def _calcular_max_tokens(quantidade: int, tipo_questao: TipoQuestao) -> int:
+        """
+        Orcamento de tokens proporcional ao tipo e a quantidade de questoes.
+
+        Valores medidos sobre as respostas reais do modelo, com folga de ~40%
+        para variacao de tamanho de enunciado:
+
+          multipla_escolha : ~150 tokens/questao (enunciado + 4 alternativas)
+          verdadeiro_falso : ~110 tokens/questao
+          lacunas          : ~140 tokens/questao
+          dissertativa     : ~380 tokens/questao (enunciado + resposta
+                             esperada + criterios de avaliacao)
+        """
+        por_questao = {
+            TipoQuestao.MULTIPLA_ESCOLHA: 220,
+            TipoQuestao.VERDADEIRO_FALSO: 170,
+            TipoQuestao.LACUNAS: 200,
+            TipoQuestao.DISSERTATIVA: 550,
+        }.get(tipo_questao, 300)
+
+        # 800 de base cobre o preambulo do JSON e a margem de seguranca.
+        estimado = 800 + (por_questao * max(1, quantidade))
+        return max(4000, min(estimado, ProvaAIService.MAX_TOKENS_TETO))
     
     def _criar_prompt_geracao(
         self,

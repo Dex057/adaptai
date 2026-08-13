@@ -37,7 +37,9 @@ class QuestaoGeradaCreate(BaseModel):
     tipo: TipoQuestao = Field(..., description="Tipo da questão")
     dificuldade: Optional[DificuldadeQuestao] = Field(None, description="Dificuldade")
     opcoes: Optional[List[str]] = Field(None, description="Opções de resposta")
-    resposta_correta: str = Field(..., description="Resposta correta")
+    # 2026-08-11: obrigatorio impedia criar questao DISSERTATIVA por este
+    # schema — ela nao tem resposta unica, e sim `criterios_avaliacao`.
+    resposta_correta: Optional[str] = Field(None, description="Resposta correta (nulo em dissertativa)")
     criterios_avaliacao: Optional[List[str]] = Field(None, description="Critérios de avaliação")
     pontuacao: float = Field(0.5, ge=0, description="Pontos da questão")
     explicacao: Optional[str] = Field(None, description="Explicação da resposta")
@@ -63,16 +65,32 @@ class QuestaoGeradaResponse(BaseModel):
     """Schema de resposta de questão gerada"""
     id: int
     prova_id: int
-    numero: int
+    numero: Optional[int] = None
     enunciado: str
     tipo: TipoQuestao
-    dificuldade: Optional[DificuldadeQuestao]
-    opcoes: Optional[List[str]]
-    resposta_correta: str
-    criterios_avaliacao: Optional[List[str]]
+    dificuldade: Optional[DificuldadeQuestao] = None
+    opcoes: Optional[List[str]] = None
+    # ------------------------------------------------------------------
+    # CORRECAO 2026-08-11 — 500 "Internal Server Error" em prova dissertativa
+    # ------------------------------------------------------------------
+    # Era `resposta_correta: str` (OBRIGATORIO). Questao DISSERTATIVA nao tem
+    # resposta correta unica — o proprio prompt manda a IA deixar `opcoes` como
+    # null e entregar `criterios_avaliacao` no lugar. A coluna no banco e
+    # nullable, entao a prova era GRAVADA com sucesso...
+    #
+    # ...e o erro so estourava DEPOIS, quando o FastAPI serializava a resposta
+    # com `response_model=ProvaResponse`. Pydantic recusava o None e levantava
+    # ValidationError FORA do try/except da rota — por isso a resposta vinha
+    # como "Internal Server Error" em text/plain (21 bytes), e nao como o JSON
+    # {"detail": ...} que o handler da rota produz.
+    #
+    # Efeito colateral: cada tentativa deixava uma prova ORFA no banco, criada
+    # com sucesso mas invisivel para o professor, que via apenas o erro.
+    resposta_correta: Optional[str] = None
+    criterios_avaliacao: Optional[List[str]] = None
     pontuacao: float
-    explicacao: Optional[str]
-    tags: Optional[List[str]]
+    explicacao: Optional[str] = None
+    tags: Optional[List[str]] = None
     criado_em: datetime
 
     model_config = ConfigDict(from_attributes=True)
@@ -81,10 +99,14 @@ class QuestaoGeradaResponse(BaseModel):
 class QuestaoParaAluno(BaseModel):
     """Schema de questão para o aluno (SEM resposta correta)"""
     id: int
-    numero: int
+    # 2026-08-11: `numero` vinha de questao_data.get("numero") — se a IA nao
+    # numerasse, ficava None e a prova QUEBRAVA na hora de o aluno abrir,
+    # com o mesmo 500 text/plain da geracao. Opcional aqui, com fallback de
+    # exibicao no frontend.
+    numero: Optional[int] = None
     enunciado: str
     tipo: TipoQuestao
-    opcoes: Optional[List[str]]
+    opcoes: Optional[List[str]] = None
     pontuacao: float
 
     model_config = ConfigDict(from_attributes=True)

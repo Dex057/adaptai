@@ -7,12 +7,15 @@ Usa cliente Anthropic centralizado (core/anthropic_client.py).
 import os
 import json
 import re
+from app.core.logging_config import get_logger
 from datetime import datetime
 from typing import Dict, List, Any, Optional
 from app.core.anthropic_client import get_anthropic_client, get_default_model
 
 # tokenmeter: atribuicao de consumo de IA (ver app/core/features.py)
 import tokenmeter as tm
+
+logger = get_logger(__name__)
 from app.core.features import F
 
 # NOTA: antes este modulo instanciava Anthropic() em module-level, o que causava
@@ -225,11 +228,27 @@ IMPORTANTE:
         try:
             response = get_anthropic_client().messages.create(
                 model=get_default_model(),
-                # TC-055: aumentado de 2000 para reduzir risco de truncamento (4 textos
-                # motivadores + proposta completa podem passar de 2000 tokens em pt-BR)
-                max_tokens=3000,
+                # TC-055 subiu de 2000 -> 3000 reconhecendo o risco de truncamento,
+                # mas SEM checar stop_reason. Um tema ENEM completo tem titulo,
+                # tema, proposta e ATE QUATRO textos motivadores densos: em pt-BR
+                # isso passa de 3000 com folga. O JSON vinha cortado, o regex
+                # `\{[\s\S]*\}` nao encontrava o fecha-chaves e a geracao morria
+                # em "Resposta da IA nao contem JSON valido". (2026-08-11)
+                max_tokens=8000,
                 messages=[{"role": "user", "content": prompt}]
             )
+
+            # Truncamento e a causa mais comum de falha aqui — detectar antes de
+            # tentar parsear evita uma mensagem generica que nao ajuda ninguem.
+            if getattr(response, "stop_reason", None) == "max_tokens":
+                logger.error(
+                    "Geracao de tema de redacao truncada no limite de tokens",
+                    extra={"area_tematica": area_tematica},
+                )
+                raise ValueError(
+                    "A geração do tema foi cortada por exceder o limite de tamanho. "
+                    "Tente novamente; se persistir, gere com menos textos motivadores."
+                )
 
             content = response.content[0].text.strip()
             if content.startswith("```"):
@@ -245,7 +264,14 @@ IMPORTANTE:
                 tema_data["nivel_dificuldade"] = nivel_dificuldade
                 return tema_data
             else:
-                raise ValueError("Resposta da IA não contém JSON válido")
+                logger.error(
+                    "Tema de redacao sem JSON reconhecivel",
+                    extra={"preview": content[:300]},
+                )
+                raise ValueError(
+                    "A IA respondeu em um formato inesperado ao gerar o tema. "
+                    "Tente novamente."
+                )
                 
         except Exception as e:
             print(f"[ERRO] Erro ao gerar tema: {e}")
@@ -355,9 +381,19 @@ IMPORTANTE:
                 # TC-055/TC-144/TC-145: 3000 tokens era insuficiente para o JSON completo
                 # (5 competencias com feedback detalhado + feedback_geral + listas), causando
                 # resposta truncada -> JSON invalido -> "Erro ao corrigir redacao. Tente novamente."
-                max_tokens=6000,
+                # 2026-08-11: 6000 ainda truncava em redacoes longas — sao 5
+                # competencias com feedback detalhado + pontos fortes + pontos de
+                # melhoria + sugestoes + feedback geral.
+                max_tokens=10000,
                 messages=[{"role": "user", "content": prompt}]
             )
+
+            if getattr(response, "stop_reason", None) == "max_tokens":
+                logger.error("Correcao de redacao truncada no limite de tokens")
+                raise ValueError(
+                    "A correção foi cortada por exceder o limite de tamanho. "
+                    "Tente enviar novamente."
+                )
 
             content = response.content[0].text.strip()
             # Remove cercas de markdown (```json ... ```), como feito nos demais servicos de IA

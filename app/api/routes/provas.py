@@ -172,7 +172,7 @@ Por favor, adapte as questões considerando:
             # Adiciona as questoes geradas
             pontos_por_questao = request.pontuacao_total / request.quantidade_questoes
             
-            for questao_data in questoes_geradas:
+            for indice, questao_data in enumerate(questoes_geradas, start=1):
                 # TC-150: a questao guarda o tipo QUE ELA TEM, nao o tipo pedido
                 # na prova. Gravar `request.tipo_questao` em todas achatava
                 # qualquer variacao vinda da IA - inclusive uma dissertativa
@@ -185,7 +185,11 @@ Por favor, adapte as questões considerando:
                 )
                 questao = QuestaoGerada(
                     prova_id=nova_prova.id,
-                    numero=questao_data.get("numero"),
+                    # 2026-08-11: a IA nem sempre numera as questoes. `numero`
+                    # ficava None e a prova quebrava na serializacao. O indice
+                    # do laco e um fallback confiavel — a ordem da lista JA e a
+                    # ordem da prova.
+                    numero=questao_data.get("numero") or indice,
                     enunciado=questao_data.get("enunciado"),
                     tipo=tipo_questao,
                     dificuldade=questao_data.get("dificuldade", request.dificuldade),

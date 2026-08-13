@@ -627,8 +627,50 @@ async def obter_job_detalhado(
         except:
             resultados = {}
     
+    # ------------------------------------------------------------------
+    # CORRECAO 2026-08-11 — "o servidor nao devolveu o planejamento"
+    # ------------------------------------------------------------------
+    # `PlanejamentoJob.to_dict()` NAO inclui `resultado_final` (o campo e
+    # pesado e o to_dict e usado tambem em listagens). Mas o frontend faz:
+    #
+    #     planejamento: data.job?.resultado_final ? ... : null
+    #
+    # Como `resultado_final` nunca vinha, o planejamento era SEMPRE null —
+    # mesmo com o job concluido e o resultado gravado no banco. A geracao
+    # funcionava; o que faltava era entregar o resultado.
+    #
+    # Anexamos o campo APENAS aqui, e apenas quando o job terminou: e o
+    # unico endpoint que precisa do payload completo.
+    job_payload = job.to_dict()
+    if job.status == _JobStatus.COMPLETED.value:
+        resultado_final = job.resultado_final
+        # O campo pode estar serializado como string (JSON em coluna Text).
+        if isinstance(resultado_final, str):
+            try:
+                resultado_final = json.loads(resultado_final)
+            except json.JSONDecodeError:
+                logger.error(
+                    "resultado_final do job nao e JSON valido",
+                    extra={"task_id": task_id},
+                )
+                resultado_final = None
+        job_payload["resultado_final"] = resultado_final
+
+        if resultado_final is None:
+            # Job "completo" sem resultado e inconsistencia real — melhor
+            # reportar como falha do que devolver sucesso vazio.
+            logger.error(
+                "Job concluido sem resultado_final",
+                extra={"task_id": task_id, "student_id": job.student_id},
+            )
+            job_payload["status"] = _JobStatus.FAILED.value
+            job_payload["ultimo_erro"] = (
+                "O planejamento foi processado mas não pôde ser recuperado. "
+                "Gere novamente."
+            )
+
     return {
-        "job": job.to_dict(),
+        "job": job_payload,
         "resultados_parciais": {
             comp: {
                 "total_objetivos": len(dados.get("objetivos", [])),

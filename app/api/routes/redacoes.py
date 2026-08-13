@@ -4,7 +4,7 @@ Endpoints para gerenciamento de redações com correção por IA
 """
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import func, case
 from typing import List
 from datetime import datetime, timezone
 
@@ -32,6 +32,59 @@ from app.core.pagination import PaginationParams, build_page
 from app.core.rate_limit import check_rate_limit
 
 router = APIRouter(prefix="/redacoes", tags=["Redações ENEM"])
+
+
+# ============================================
+# ESCOPO MULTI-TENANT DOS TEMAS
+# ============================================
+#
+# CORRECAO 2026-08-13 — vazamento entre escolas
+#
+# `TemaRedacao` nao tem coluna `escola_id`: o unico vinculo com o tenant e o
+# `criado_por_id` -> `users.escola_id`. Como `listar_temas` filtrava apenas por
+# `ativo == True`, QUALQUER professor via os temas de TODAS as escolas da base —
+# e `obter_tema` nao tinha verificacao nenhuma (IDOR: bastava chutar o id).
+#
+# O escopo passa a ser derivado do autor, via JOIN, sem migration:
+#
+#   super_admin           -> ve tudo (papel existe justamente para isso)
+#   usuario COM escola    -> ve temas de autores da MESMA escola
+#   usuario SEM escola    -> ve apenas os proprios temas
+#
+# O ultimo caso importa: comparar `escola_id == None` no SQL agruparia TODOS os
+# usuarios legados sem escola num "tenant nulo" comum — seria o mesmo vazamento
+# com outra roupa. Sem escola, o escopo cai para o proprio autor.
+#
+# Efeito colateral consciente: temas com `criado_por_id` NULL (seed/script antigo)
+# ficam invisiveis para nao-super-admins. Nao ha como atribui-los a uma escola, e
+# exibi-los para todo mundo seria justamente o vazamento que estamos fechando.
+
+
+def _escopo_temas(query, current_user: User):
+    """Restringe uma query de TemaRedacao ao tenant do usuario."""
+    if getattr(current_user, "is_super_admin", False):
+        return query
+    if current_user.escola_id is not None:
+        return query.join(User, TemaRedacao.criado_por_id == User.id).filter(
+            User.escola_id == current_user.escola_id
+        )
+    return query.filter(TemaRedacao.criado_por_id == current_user.id)
+
+
+def _obter_tema_do_escopo(db: Session, tema_id: int, current_user: User) -> TemaRedacao:
+    """
+    Busca um tema garantindo que ele pertence ao tenant do usuario.
+
+    Responde 404 (e nao 403) quando o tema existe mas e de outra escola: dizer
+    "existe, mas voce nao pode ver" ja entrega a informacao de que aquele id
+    existe. Para quem nao tem acesso, o tema simplesmente nao existe.
+    """
+    tema = _escopo_temas(
+        db.query(TemaRedacao).filter(TemaRedacao.id == tema_id), current_user
+    ).first()
+    if not tema:
+        raise HTTPException(status_code=404, detail="Tema não encontrado")
+    return tema
 
 
 # ============================================
@@ -201,30 +254,60 @@ def listar_temas(
         pagination.page = real_page
         pagination.size = real_limit
     
-    query = db.query(TemaRedacao).filter(TemaRedacao.ativo == True).order_by(TemaRedacao.criado_em.desc())
-    
+    # Escopo multi-tenant: ver bloco no topo do arquivo. Antes desta linha, o
+    # filtro era so `ativo == True` — todo professor via os temas de todas as
+    # escolas da base.
+    query = _escopo_temas(
+        db.query(TemaRedacao).filter(TemaRedacao.ativo == True), current_user
+    ).order_by(TemaRedacao.criado_em.desc())
+
     total = query.count()
     temas = query.offset(pagination.offset).limit(pagination.limit).all()
     
     # Evitar N+1: calcular contadores em uma query agregada
+    #
+    # -------------------------------------------------------------------
+    # CORRECAO 2026-08-13 — "gerei o tema, mas ele nao aparece em /redacoes"
+    # -------------------------------------------------------------------
+    # Era `func.case((cond, 1), else_=0)`. `case` NAO e uma funcao SQL: e um
+    # construtor do proprio SQLAlchemy (`sqlalchemy.case`). Passar por `func.`
+    # tenta montar uma Function chamada "case", e o kwarg `else_` estoura antes
+    # mesmo de gerar SQL:
+    #     TypeError: Function.__init__() got an unexpected keyword argument 'else_'
+    #
+    # O detalhe que escondeu o bug: este bloco so roda `if tema_ids`. Com a base
+    # vazia, GET /redacoes/temas respondia 200 com lista vazia — parecia normal.
+    # A partir do PRIMEIRO tema salvo, todo GET /redacoes/temas passava a estourar
+    # 500. Ou seja: o tema era gravado (o POST /gerar-tema commita certo), mas a
+    # tela que o exibiria nunca mais carregava. Sintoma relatado: "o tema nao
+    # esta salvando pra mim".
+    #
+    # Alem de trocar para o `case` correto, os contadores agora sao best-effort:
+    # eles sao informacao SECUNDARIA (quantas redacoes/corrigidas por tema). Se a
+    # agregacao falhar por qualquer motivo, a lista de temas — que e o dado
+    # primario da tela — continua sendo entregue, com contadores zerados.
     tema_ids = [t.id for t in temas]
     contadores = {}
     if tema_ids:
-        rows = (
-            db.query(
-                RedacaoAluno.tema_id,
-                func.count(RedacaoAluno.id).label("total"),
-                func.sum(
-                    func.case((RedacaoAluno.status == StatusRedacao.CORRIGIDA, 1), else_=0)
-                ).label("corrigidas"),
+        try:
+            rows = (
+                db.query(
+                    RedacaoAluno.tema_id,
+                    func.count(RedacaoAluno.id).label("total"),
+                    func.sum(
+                        case((RedacaoAluno.status == StatusRedacao.CORRIGIDA, 1), else_=0)
+                    ).label("corrigidas"),
+                )
+                .filter(RedacaoAluno.tema_id.in_(tema_ids))
+                .group_by(RedacaoAluno.tema_id)
+                .all()
             )
-            .filter(RedacaoAluno.tema_id.in_(tema_ids))
-            .group_by(RedacaoAluno.tema_id)
-            .all()
-        )
-        for tema_id, total_, corrigidas in rows:
-            contadores[tema_id] = (total_ or 0, int(corrigidas or 0))
-    
+            for tema_id, total_, corrigidas in rows:
+                contadores[tema_id] = (total_ or 0, int(corrigidas or 0))
+        except Exception as e:
+            print(f"[AVISO] Contadores de redacao indisponiveis (lista segue): {e}")
+            contadores = {}
+
     items = []
     for tema in temas:
         total_redacoes, total_corrigidas = contadores.get(tema.id, (0, 0))
@@ -253,12 +336,9 @@ def obter_tema(
     """
     📄 Obter detalhes de um tema
     """
-    tema = db.query(TemaRedacao).filter(TemaRedacao.id == tema_id).first()
-    
-    if not tema:
-        raise HTTPException(status_code=404, detail="Tema não encontrado")
-    
-    return tema
+    # SEGURANCA: antes nao havia verificacao alguma aqui — qualquer usuario
+    # autenticado lia o tema de qualquer escola so chutando o id (IDOR).
+    return _obter_tema_do_escopo(db, tema_id, current_user)
 
 
 @router.get("/temas/{tema_id}/redacoes")
@@ -305,11 +385,11 @@ def atribuir_tema_aluno(
     """
     👨‍🎓 Atribuir tema a um aluno
     """
-    # Verificar se tema existe
-    tema = db.query(TemaRedacao).filter(TemaRedacao.id == tema_id).first()
-    if not tema:
-        raise HTTPException(status_code=404, detail="Tema não encontrado")
-    
+    # SEGURANCA: o tema tambem precisa ser do escopo do usuario. Sem isso, um
+    # professor podia atribuir o tema de outra escola ao proprio aluno — e o
+    # conteudo do tema vazaria pela tela do aluno.
+    tema = _obter_tema_do_escopo(db, tema_id, current_user)
+
     # SEGURANCA: verificar acesso ao aluno (evita IDOR entre escolas)
     aluno = verificar_acesso_aluno(db, aluno_id, current_user)
     

@@ -58,11 +58,22 @@ TIPOS_HABILITADOS = {
     "caca_palavras", "quiz_interativo", "roleta_perguntas",
     # cruzadinha: mesma situacao do mapa_mental (viewer dedicado, em producao).
     "cruzadinha",
+    # 2026-08-14 — rodada 1 de liberacao: ganharam viewer dedicado no front
+    # (JogosTabuleiroViewers.jsx). Espelhar SEMPRE com TIPOS_HABILITADOS de
+    # adaptai-frontend/src/pages/materiaisAdaptados/config.js.
+    "arvore_decisao", "bingo", "domino", "trilha_aprendizagem",
     # 💙 TEA/TDAH
     "historia_social", "termometro_emocoes", "cartoes_comunicacao",
     "checklist_tarefas",
+    # 2026-08-14 — rodada 2 de liberacao (front: TeaTdahViewers.jsx).
+    # sequenciamento ja constava com viewer, mas o viewer lia campos errados
+    # (titulo/descricao em vez de acao/dica/checkpoint) — corrigido junto.
+    "quadro_rotina", "contrato_comportamento", "painel_primeiro_depois",
+    "sequenciamento",
     # ✍️ Completar
     "verdadeiro_falso", "complete_lacunas", "ordenar_sequencia",
+    # 2026-08-14 — rodada 2 (front: InterativosViewers.jsx).
+    "ligue_colunas",
     # 📝 Avaliacao (qualidade dos 3 formatos ainda em validacao pedagogica)
     "avaliacao",
     # 🔬 Praticos (categoria inteira; qualidade a validar)

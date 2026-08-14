@@ -52,8 +52,15 @@ TIPOS_HABILITADOS = {
     # mapa_mental: nao constava na lista de homologacao, mas tem viewer
     # dedicado e esta em uso em producao — bloquea-lo seria regressao.
     "mapa_mental",
+    # 2026-08-15 — geracao de imagem real (Flux/fal.ai) ligada em
+    # ai_materiais_service._ilustrar_itens + viewer dedicado no front
+    # (IlustradosViewers.jsx). Requer FAL_API_KEY; sem ela, degrada pro texto
+    # da descricao (nunca quebra, so nao ilustra).
+    "hq_tirinha",
     # 🧠 Memorizacao
     "flashcards", "jogo_memoria",
+    # 2026-08-15 — mesma liberacao de hq_tirinha (ilustracao real por figurinha).
+    "album_figurinhas",
     # 🎮 Jogos
     "caca_palavras", "quiz_interativo", "roleta_perguntas",
     # cruzadinha: mesma situacao do mapa_mental (viewer dedicado, em producao).

@@ -7,16 +7,35 @@ Usa cache de IA (services/ai_cache_service.py) para economizar creditos.
 """
 import json
 import hashlib
+import base64
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Any, List
 from app.core.anthropic_client import get_anthropic_client, get_default_model
 from app.services.ai_cache_service import lookup_cache, save_cache
 from app.core.logging_config import get_logger
+
+# 2026-08-15: hq_tirinha e album_figurinhas ligados ao pipeline de ilustracao
+# por IA (Flux via fal.ai) que ja existia para Material/Questao/TemaRedacao
+# mas nunca tinha sido conectado aqui — ver _ilustrar_itens mais abaixo.
+from app.services import ilustracao_service
+from app.services.image_providers import (
+    get_image_provider,
+    ProvedorImagemIndisponivel,
+    ErroGeracaoImagem,
+)
 
 # tokenmeter: atribuicao de consumo de IA (ver app/core/features.py)
 import tokenmeter as tm
 from app.core.features import F
 
 logger = get_logger(__name__)
+
+# Tetos de seguranca (custo + tempo): os prompts pedem "4-6 quadrinhos" ou uma
+# colecao de figurinhas sem limite explicito, mas a IA pode devolver mais. Sem
+# teto, um album generoso multiplicaria chamadas pagas de imagem sem controle.
+MAX_IMAGENS_HQ = 6
+MAX_IMAGENS_ALBUM = 12
+_MAX_WORKERS_ILUSTRACAO = 3  # paralelo (I/O-bound); nao precisa ser o total de imagens
 
 
 class MaterialAdaptadoService:
@@ -106,7 +125,76 @@ class MaterialAdaptadoService:
             pass
         
         return parsed
-    
+
+    def _ilustrar_itens(
+        self,
+        itens: List[Dict[str, Any]],
+        campo_descricao: str,
+        tamanho: str = "quadrado",
+        limite: int = None,
+    ) -> List[Dict[str, Any]]:
+        """Gera uma ilustracao IA (Flux via fal.ai) para cada item de uma lista,
+        em paralelo, e MUTA cada item adicionando `imagem_gerada` (data URI
+        base64 pronta para <img src>).
+
+        Usada por hq_tirinha (cada quadrinho) e album_figurinhas (cada
+        figurinha) — os unicos dois tipos cujo prompt descreve uma cena para
+        DESENHAR (`cenario`/`imagem_descricao`) em vez de so texto.
+
+        Decisoes de escopo:
+          - Sincrono, na mesma chamada de /materiais-adaptados/gerar — o
+            endpoint ja e sincrono e ja pode levar minutos gerando varios
+            tipos numa chamada so; isso so soma mais um tipo lento a lista.
+          - Paralelizado (ThreadPoolExecutor) porque cada chamada e I/O-bound
+            (rede) — gerar 6 imagens em serie multiplicaria o tempo por 6.
+          - Imagem embutida como data URI base64 DIRETO no item, sem tabela
+            nova nem rota de arquivo — reaproveita o `resultado_json` que ja
+            e o "cache" do material adaptado (MaterialAdaptadoGerado). Troca
+            simplicidade por tamanho do JSON no banco (uma imagem ~150-400KB
+            vira ~200-550KB em base64); reavaliar se o volume crescer muito.
+          - Falha por item (rede, provedor indisponivel, filtro de seguranca)
+            NAO derruba o material inteiro: o item so fica sem
+            `imagem_gerada`, e o front cai no texto (`cenario`/
+            `imagem_descricao`) como fallback.
+          - Sem FAL_API_KEY configurada: uma unica checagem de disponibilidade
+            antes do loop (nao N tentativas fadadas a falhar) — devolve so o
+            texto, mesmo comportamento de antes desta mudanca.
+          - `limite`: a IA pode devolver mais itens do que o prompt pede; sem
+            teto, um album generoso multiplicaria chamadas pagas sem controle
+            (ver MAX_IMAGENS_HQ / MAX_IMAGENS_ALBUM).
+        """
+        if not itens:
+            return itens
+
+        try:
+            provedor = get_image_provider()
+        except ProvedorImagemIndisponivel:
+            return itens
+        if not provedor.disponivel():
+            return itens
+
+        alvo = itens[:limite] if limite else itens
+
+        def _gerar(item: Dict[str, Any]) -> None:
+            descricao = (item.get(campo_descricao) or "").strip()
+            if not descricao:
+                return
+            try:
+                prompt = ilustracao_service.gerar_prompt_ilustracao("material", descricao)
+                image_bytes = ilustracao_service.gerar_ilustracao_ia(prompt, tamanho=tamanho)
+                item["imagem_gerada"] = (
+                    "data:image/png;base64," + base64.b64encode(image_bytes).decode("ascii")
+                )
+            except (ProvedorImagemIndisponivel, ErroGeracaoImagem) as e:
+                logger.warning("Falha ao ilustrar item ('%s...'): %s", descricao[:40], e)
+            except Exception:
+                logger.exception("Erro inesperado ao ilustrar item ('%s...')", descricao[:40])
+
+        with ThreadPoolExecutor(max_workers=_MAX_WORKERS_ILUSTRACAO) as executor:
+            list(executor.map(_gerar, alvo))
+
+        return itens
+
     # ==========================================================================
     # ADAPTACAO POR PERFIL DO ALUNO — 2026-08-11
     # ==========================================================================
@@ -338,8 +426,18 @@ FORMATO JSON:
   "moral_historia": "O que aprendemos"
 }}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 3072)
-    
+        resultado = self._chamar_ia(prompt, 3072)
+        # 2026-08-15: cada quadrinho ganha uma ilustracao de verdade (Flux via
+        # fal.ai) a partir de `cenario` — antes so o texto da cena existia.
+        # "paisagem" porque quadrinho de HQ costuma ser mais largo que alto.
+        self._ilustrar_itens(
+            resultado.get("quadrinhos") or [],
+            campo_descricao="cenario",
+            tamanho="paisagem",
+            limite=MAX_IMAGENS_HQ,
+        )
+        return resultado
+
     def gerar_diagrama_venn(self, disciplina: str, serie: str, conteudo: str) -> Dict[str, Any]:
         """Gera Diagrama de Venn para comparações"""
         prompt = f"""Criar DIAGRAMA DE VENN sobre "{conteudo}" ({disciplina}, {serie}).
@@ -453,8 +551,23 @@ FORMATO JSON:
   "desafio_completar": "Meta ao completar o álbum"
 }}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 3072)
-    
+        resultado = self._chamar_ia(prompt, 3072)
+        # 2026-08-15: cada figurinha ganha uma ilustracao de verdade (Flux via
+        # fal.ai) a partir de `imagem_descricao` — antes so o texto existia.
+        # As figurinhas ficam aninhadas em categorias[]; achata pra aplicar o
+        # teto MAX_IMAGENS_ALBUM no total (nao por categoria) e ilustrar tudo
+        # numa unica leva paralela. _ilustrar_itens muta os dicts in-place,
+        # entao o efeito aparece direto dentro de `categorias` tambem.
+        categorias = resultado.get("categorias") or []
+        todas_figurinhas = [f for cat in categorias for f in (cat.get("figurinhas") or [])]
+        self._ilustrar_itens(
+            todas_figurinhas,
+            campo_descricao="imagem_descricao",
+            tamanho="quadrado",
+            limite=MAX_IMAGENS_ALBUM,
+        )
+        return resultado
+
     # ==========================================
     # 🎮 JOGOS EDUCATIVOS
     # ==========================================

@@ -58,6 +58,10 @@ TIPOS_HABILITADOS = {
     "caca_palavras", "quiz_interativo", "roleta_perguntas",
     # cruzadinha: mesma situacao do mapa_mental (viewer dedicado, em producao).
     "cruzadinha",
+    # 2026-08-14 — rodada 1 de liberacao: ganharam viewer dedicado no front
+    # (JogosTabuleiroViewers.jsx). Espelhar SEMPRE com TIPOS_HABILITADOS de
+    # adaptai-frontend/src/pages/materiaisAdaptados/config.js.
+    "arvore_decisao", "bingo", "domino", "trilha_aprendizagem",
     # 💙 TEA/TDAH
     "historia_social", "termometro_emocoes", "cartoes_comunicacao",
     "checklist_tarefas",

@@ -65,8 +65,15 @@ TIPOS_HABILITADOS = {
     # 💙 TEA/TDAH
     "historia_social", "termometro_emocoes", "cartoes_comunicacao",
     "checklist_tarefas",
+    # 2026-08-14 — rodada 2 de liberacao (front: TeaTdahViewers.jsx).
+    # sequenciamento ja constava com viewer, mas o viewer lia campos errados
+    # (titulo/descricao em vez de acao/dica/checkpoint) — corrigido junto.
+    "quadro_rotina", "contrato_comportamento", "painel_primeiro_depois",
+    "sequenciamento",
     # ✍️ Completar
     "verdadeiro_falso", "complete_lacunas", "ordenar_sequencia",
+    # 2026-08-14 — rodada 2 (front: InterativosViewers.jsx).
+    "ligue_colunas",
     # 📝 Avaliacao (qualidade dos 3 formatos ainda em validacao pedagogica)
     "avaliacao",
     # 🔬 Praticos (categoria inteira; qualidade a validar)

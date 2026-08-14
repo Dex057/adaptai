@@ -99,6 +99,11 @@ class MaterialAlunoResponse(BaseModel):
         from_attributes = True
 
 
+class AtribuirAlunosRequest(BaseModel):
+    """Atribui um material JA GERADO a alunos adicionais, sem gerar de novo."""
+    aluno_ids: List[int] = Field(..., min_items=1)
+
+
 class VisualizarMaterialRequest(BaseModel):
     """Request para visualizar material"""
     pass

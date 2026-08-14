@@ -15,7 +15,8 @@ from app.models.material import Material, MaterialAluno, TipoMaterial, StatusMat
 from app.models.agenda import AgendaProfessor, TipoEvento, StatusEvento, Recorrencia
 from app.schemas.material import (
     MaterialCreate, MaterialResponse, MaterialListResponse,
-    MaterialAlunoResponse, AnotacaoRequest, FavoritoRequest
+    MaterialAlunoResponse, AnotacaoRequest, FavoritoRequest,
+    AtribuirAlunosRequest
 )
 from app.api.dependencies import get_current_active_user
 from app.core.tenant import enforce_limite_materiais
@@ -496,6 +497,58 @@ async def listar_alunos_material(
             detail="Material não encontrado"
         )
     
+    return material.materiais_alunos
+
+
+@router.post("/{material_id}/atribuir", response_model=List[MaterialAlunoResponse])
+async def atribuir_material_alunos(
+    material_id: int,
+    payload: AtribuirAlunosRequest,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Atribui um material JA GERADO a alunos adicionais — reaproveita a mesma
+    geracao (mesmo arquivo no storage) em vez de gerar de novo para cada aluno.
+
+    2026-08-15: a UI ja prometia isso ("materiais reutilizaveis que voce pode
+    atribuir a varios alunos"), mas o endpoint nunca existiu — pendencia
+    documentada em docs/CORRECOES-2026-08-11.md item 4.
+    """
+    material = db.query(Material).filter(
+        Material.id == material_id,
+        Material.criado_por_id == current_user.id
+    ).first()
+    if not material:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Material não encontrado"
+        )
+
+    # Mesma checagem de posse usada em criar_material — evita atribuir a
+    # aluno de outro professor (IDOR).
+    alunos = db.query(Student).filter(
+        Student.id.in_(payload.aluno_ids),
+        Student.created_by_user_id == current_user.id
+    ).all()
+    if len(alunos) != len(payload.aluno_ids):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Um ou mais alunos não encontrados ou não pertencem a você"
+        )
+
+    # Ignora quem ja tem acesso — evita duplicar a linha em materiais_alunos
+    # (nao ha UniqueConstraint na tabela; a checagem aqui e a unica garantia).
+    ja_atribuidos = {ma.aluno_id for ma in material.materiais_alunos}
+    novos = [a for a in alunos if a.id not in ja_atribuidos]
+
+    for aluno in novos:
+        db.add(MaterialAluno(material_id=material.id, aluno_id=aluno.id))
+
+    if novos:
+        db.commit()
+        db.refresh(material)
+
     return material.materiais_alunos
 
 

@@ -25,6 +25,34 @@ from app.services.storage_service import storage_service
 
 router = APIRouter(prefix="/materiais", tags=["Materiais de Estudo"])
 
+# Mesmos campos que app/api/routes/materiais_adaptados.py le do diagnostico do
+# aluno (Student.diagnosis, coluna JSON -> dict em Python).
+_CAMPOS_DIAGNOSTICO = [
+    ("tea", "TEA"),
+    ("tdah", "TDAH"),
+    ("dislexia", "dislexia"),
+    ("discalculia", "discalculia"),
+    ("disgrafia", "disgrafia"),
+    ("deficiencia_intelectual", "deficiência intelectual"),
+    ("superdotacao", "superdotação"),
+]
+
+
+def _rotular_diagnostico(diagnostico: dict) -> str:
+    """Extrai um rotulo curto e legivel (string) do diagnostico do aluno, para
+    entrar no prompt de geracao como texto.
+
+    2026-08-15: material_service.gerar_material_*(adaptacoes=[...]) espera uma
+    lista de STRINGS (faz ', '.join(adaptacoes) no prompt). O chamador
+    montava `adaptacoes` com o dict `diagnosis` inteiro e ainda tentava
+    `set(...)` em cima disso -> "unhashable type: 'dict'", material sempre
+    caia em StatusMaterial.ERRO antes de qualquer chamada a IA.
+    """
+    if not isinstance(diagnostico, dict):
+        return ""
+    rotulos = [nome for campo, nome in _CAMPOS_DIAGNOSTICO if diagnostico.get(campo)]
+    return ", ".join(rotulos)
+
 
 def gerar_material_background(material_id: int):
     """
@@ -50,7 +78,14 @@ def gerar_material_background(material_id: int):
         # Buscar adaptações
         alunos_ids = [ma.aluno_id for ma in material.materiais_alunos]
         alunos = db_session.query(Student).filter(Student.id.in_(alunos_ids)).all()
-        adaptacoes = list(set([a.diagnosis for a in alunos if a.diagnosis]))
+        # 2026-08-15: era `list(set([a.diagnosis for ...]))` — a.diagnosis e um
+        # dict (coluna JSON), e dict nao e hashable. set() estourava
+        # "unhashable type: 'dict'" ANTES de chamar a IA, pra qualquer aluno
+        # com diagnostico preenchido. Agora extrai rotulos (strings) e so
+        # depois deduplica.
+        adaptacoes = sorted(set(
+            filter(None, (_rotular_diagnostico(a.diagnosis) for a in alunos if a.diagnosis))
+        ))
         
         # FECHAR SESSÃO - vamos gerar conteúdo SEM banco aberto
         db_session.close()

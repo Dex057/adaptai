@@ -149,15 +149,43 @@ class AnaliseQualitativaService:
     
     def _criar_prompt_analise(self, dados: Dict, prova_aluno: ProvaAluno) -> str:
         """Cria prompt para Claude API"""
-        
+
+        # ------------------------------------------------------------------
+        # CORRECAO 2026-08-11 — "unsupported format string passed to
+        #                        NoneType.__format__"
+        # ------------------------------------------------------------------
+        # As linhas abaixo faziam `{...['nota_final']:.1f}` e
+        # `{...['percentual_acerto']:.1f}` direto. Formatar None com `:.1f`
+        # levanta TypeError em Python — e era exatamente essa excecao que
+        # aparecia crua na tela do professor.
+        #
+        # Quando nota_final e None: prova ainda nao corrigida, ou prova com
+        # questoes DISSERTATIVAS — que nao tem correcao automatica. Ou seja,
+        # justamente as provas que mais precisam de analise qualitativa eram
+        # as que quebravam.
+        #
+        # `_num` formata com seguranca e devolve um rotulo honesto quando o
+        # dado nao existe, em vez de inventar 0.0 (que faria a IA analisar um
+        # desempenho zerado que nunca aconteceu).
+        def _num(valor, casas: int = 1, sufixo: str = "") -> str:
+            if valor is None:
+                return "não informado"
+            try:
+                return f"{float(valor):.{casas}f}{sufixo}"
+            except (TypeError, ValueError):
+                return "não informado"
+
+        nota_final = dados['prova'].get('nota_final')
+        percentual = dados['desempenho'].get('percentual_acerto')
+
         prompt = f"""Você é um professor especialista em {dados['prova']['materia']} analisando o desempenho de um aluno.
 
 **DADOS DA PROVA:**
 - Título: {dados['prova']['titulo']}
 - Matéria: {dados['prova']['materia']}
 - Nível: {dados['prova']['serie_nivel']}
-- Nota Final: {dados['prova']['nota_final']:.1f}/10
-- Aprovado: {'Sim' if dados['prova']['aprovado'] else 'Não'}
+- Nota Final: {_num(nota_final)}/10
+- Aprovado: {'Sim' if dados['prova'].get('aprovado') else 'Não'}
 
 **ALUNO:**
 - Nome: {dados['aluno']['nome']}
@@ -165,9 +193,20 @@ class AnaliseQualitativaService:
 
 **DESEMPENHO GERAL:**
 - Total de questões: {dados['desempenho']['total_questoes']}
-- Acertos: {dados['desempenho']['acertos']} ({dados['desempenho']['percentual_acerto']:.1f}%)
+- Acertos: {dados['desempenho']['acertos']} ({_num(percentual, sufixo='%')})
 - Erros: {dados['desempenho']['erros']}
+"""
 
+        # Se a prova nao foi corrigida, a IA precisa SABER disso — senao
+        # produz uma analise confiante sobre numeros que nao existem.
+        if nota_final is None or percentual is None:
+            prompt += (
+                "\n**ATENÇÃO:** esta prova ainda não tem correção automática "
+                "completa (pode conter questões dissertativas). Baseie a análise "
+                "nas respostas em si, não em notas, e diga isso ao professor.\n"
+            )
+
+        prompt += """
 **DESEMPENHO POR DIFICULDADE:**
 """
         

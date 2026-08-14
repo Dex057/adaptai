@@ -9,7 +9,7 @@ from typing import Optional, List
 import json
 import asyncio
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from app.database import get_db
 from app.api.dependencies import (
@@ -92,7 +92,11 @@ async def iniciar_geracao_planejamento(
     task_id = task_manager.create_task()
     
     # Função que será executada em background
-    async def executar_geracao():
+    async def executar_geracao(**_injetados):
+        # run_task injeta task_id/task_manager como kwargs. Ja temos os
+        # dois por closure, entao aceitamos e ignoramos — mas a
+        # assinatura PRECISA aceitar, senao levanta TypeError e o job
+        # fica preso em 'pending' (ver background_tasks.run_task).
         # Criar nova sessão para a tarefa em background
         from app.database import SessionLocal
         db_bg = SessionLocal()
@@ -571,10 +575,45 @@ async def obter_job_detalhado(
     
     if not job:
         raise HTTPException(status_code=404, detail="Job não encontrado")
-    
+
     # IDOR: verifica acesso ao aluno dono do job
     verificar_acesso_aluno(db, job.student_id, current_user)
-    
+
+    # ------------------------------------------------------------------
+    # 2026-08-11 — DETECCAO DE JOB ABANDONADO
+    # ------------------------------------------------------------------
+    # Se o worker morre antes de tocar o job (crash, restart do Railway,
+    # excecao na assinatura da closure), a linha fica em "pending" para
+    # sempre e o frontend faz polling ate o timeout de 20 minutos sem
+    # nenhuma explicacao ao professor.
+    #
+    # Aqui reconciliamos: job PENDING sem progresso ha mais de 3 minutos
+    # e um job que nunca comecou. Marcamos como failed com uma mensagem
+    # util, para o polling terminar e o erro aparecer na tela.
+    from app.models.planejamento_job import JobStatus as _JobStatus
+
+    LIMITE_PENDING_MIN = 3
+    if job.status == _JobStatus.PENDING.value and not job.started_at:
+        criado = job.created_at
+        if criado:
+            if criado.tzinfo is None:
+                criado = criado.replace(tzinfo=timezone.utc)
+            parado_ha = datetime.now(timezone.utc) - criado
+            if parado_ha > timedelta(minutes=LIMITE_PENDING_MIN):
+                logger.error(
+                    "Job de planejamento abandonado em pending",
+                    extra={"task_id": task_id, "minutos": parado_ha.total_seconds() / 60},
+                )
+                job.status = _JobStatus.FAILED.value
+                job.ultimo_erro = (
+                    "A geração não chegou a iniciar no servidor. "
+                    "Tente novamente; se persistir, verifique se a chave da IA "
+                    "está configurada."
+                )
+                job.completed_at = datetime.now(timezone.utc)
+                db.commit()
+                db.refresh(job)
+
     # Buscar logs
     logs = db.query(PlanejamentoJobLog).filter(
         PlanejamentoJobLog.job_id == job.id
@@ -588,8 +627,50 @@ async def obter_job_detalhado(
         except:
             resultados = {}
     
+    # ------------------------------------------------------------------
+    # CORRECAO 2026-08-11 — "o servidor nao devolveu o planejamento"
+    # ------------------------------------------------------------------
+    # `PlanejamentoJob.to_dict()` NAO inclui `resultado_final` (o campo e
+    # pesado e o to_dict e usado tambem em listagens). Mas o frontend faz:
+    #
+    #     planejamento: data.job?.resultado_final ? ... : null
+    #
+    # Como `resultado_final` nunca vinha, o planejamento era SEMPRE null —
+    # mesmo com o job concluido e o resultado gravado no banco. A geracao
+    # funcionava; o que faltava era entregar o resultado.
+    #
+    # Anexamos o campo APENAS aqui, e apenas quando o job terminou: e o
+    # unico endpoint que precisa do payload completo.
+    job_payload = job.to_dict()
+    if job.status == _JobStatus.COMPLETED.value:
+        resultado_final = job.resultado_final
+        # O campo pode estar serializado como string (JSON em coluna Text).
+        if isinstance(resultado_final, str):
+            try:
+                resultado_final = json.loads(resultado_final)
+            except json.JSONDecodeError:
+                logger.error(
+                    "resultado_final do job nao e JSON valido",
+                    extra={"task_id": task_id},
+                )
+                resultado_final = None
+        job_payload["resultado_final"] = resultado_final
+
+        if resultado_final is None:
+            # Job "completo" sem resultado e inconsistencia real — melhor
+            # reportar como falha do que devolver sucesso vazio.
+            logger.error(
+                "Job concluido sem resultado_final",
+                extra={"task_id": task_id, "student_id": job.student_id},
+            )
+            job_payload["status"] = _JobStatus.FAILED.value
+            job_payload["ultimo_erro"] = (
+                "O planejamento foi processado mas não pôde ser recuperado. "
+                "Gere novamente."
+            )
+
     return {
-        "job": job.to_dict(),
+        "job": job_payload,
         "resultados_parciais": {
             comp: {
                 "total_objetivos": len(dados.get("objetivos", [])),
@@ -651,7 +732,11 @@ async def retomar_job(
     task_manager = get_task_manager()
     new_task_id = task_manager.create_task()
     
-    async def executar_retomada():
+    async def executar_retomada(**_injetados):
+        # run_task injeta task_id/task_manager como kwargs. Ja temos os
+        # dois por closure, entao aceitamos e ignoramos — mas a
+        # assinatura PRECISA aceitar, senao levanta TypeError e o job
+        # fica preso em 'pending' (ver background_tasks.run_task).
         from app.database import SessionLocal
         db_bg = SessionLocal()
         try:
@@ -1237,6 +1322,46 @@ async def iniciar_geracao_planejamento_completo(
 
     service = PlanejamentoBNNCCompletoService(db)
 
+    # ------------------------------------------------------------------
+    # 2026-08-11 — LIMPEZA DE JOBS ORFAOS
+    # ------------------------------------------------------------------
+    # Antes da correcao do run_task (kwargs injetados numa closure que nao os
+    # aceitava), TODA geracao morria antes de comecar e deixava a linha presa
+    # em 'pending'/'processing'. Esses restos bloqueiam novas geracoes pelo
+    # `verificar_job_em_andamento` e fazem o cliente reconectar a um job que
+    # nunca vai terminar.
+    #
+    # Em vez de exigir um UPDATE manual no banco, a propria rota reconcilia:
+    # job parado ha mais de 15 minutos sem resultado nunca vai concluir.
+    try:
+        from app.models.planejamento_job import PlanejamentoJob, JobStatus as _JS
+
+        limite = datetime.now(timezone.utc) - timedelta(minutes=15)
+        orfaos = (
+            db.query(PlanejamentoJob)
+            .filter(
+                PlanejamentoJob.student_id == request.student_id,
+                PlanejamentoJob.status.in_([_JS.PENDING.value, _JS.PROCESSING.value]),
+                PlanejamentoJob.resultado_final.is_(None),
+                PlanejamentoJob.created_at < limite,
+            )
+            .all()
+        )
+        for orfao in orfaos:
+            orfao.status = _JS.FAILED.value
+            orfao.ultimo_erro = "Job interrompido - liberado automaticamente."
+            orfao.completed_at = datetime.now(timezone.utc)
+        if orfaos:
+            db.commit()
+            logger.info(
+                "Jobs orfaos de planejamento liberados",
+                extra={"student_id": request.student_id, "quantidade": len(orfaos)},
+            )
+    except Exception:
+        # Limpeza e best-effort: nunca deve impedir uma geracao nova.
+        logger.warning("Falha ao limpar jobs orfaos", exc_info=True)
+        db.rollback()
+
     # 409 (e nao 400/500) para job duplicado: o frontend consegue distinguir
     # "ja existe, reconecte-se a ele" de "deu erro, tente de novo" e recebe o
     # task_id ativo para retomar o polling em vez de recomecar do zero.
@@ -1274,7 +1399,11 @@ async def iniciar_geracao_planejamento_completo(
     componentes = request.componentes
 
     # Função que será executada em background
-    async def executar_geracao_completa():
+    async def executar_geracao_completa(**_injetados):
+        # run_task injeta task_id/task_manager como kwargs. Ja temos os
+        # dois por closure, entao aceitamos e ignoramos — mas a
+        # assinatura PRECISA aceitar, senao levanta TypeError e o job
+        # fica preso em 'pending' (ver background_tasks.run_task).
         from app.database import SessionLocal
         db_bg = SessionLocal()
         try:

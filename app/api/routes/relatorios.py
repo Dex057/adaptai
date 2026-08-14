@@ -212,6 +212,34 @@ Estrutura:
         
     except Exception as e:
         print(f"❌ [BACKGROUND] Erro no processamento: {e}")
+        # ANTES: a excecao so era logada no console. Como o GET /relatorios/{id}
+        # so marca "processando: false" quando o arquivo JSON existe, uma falha
+        # aqui (IA fora do ar, modelo invalido, rate limit, etc.) deixava o
+        # relatorio preso em "Processando..." PARA SEMPRE - o frontend fica
+        # fazendo polling ate o timeout de 3min e trava, sem nenhum sinal de
+        # erro para o usuario tentar de novo. Gravar um marcador de erro fecha
+        # esse limbo: o arquivo passa a existir (processando vira false) e o
+        # tipo fica reconhecivel para o frontend tratar como falha, nao sucesso.
+        try:
+            erro_data = {
+                "erro_parse": True,
+                "erro_processamento": True,
+                "mensagem": f"Falha ao processar relatório com IA: {e}",
+            }
+            with open(json_path, 'w', encoding='utf-8') as f:
+                json.dump(erro_data, f, ensure_ascii=False, indent=2)
+
+            db_erro = SessionLocal()
+            try:
+                relatorio = db_erro.query(Relatorio).filter(Relatorio.id == relatorio_id).first()
+                if relatorio:
+                    relatorio.tipo = "Erro no processamento"
+                    relatorio.resumo = "Não foi possível analisar este relatório automaticamente. Tente novamente."
+                    db_erro.commit()
+            finally:
+                db_erro.close()
+        except Exception as e2:
+            print(f"❌ [BACKGROUND] Falha ao registrar estado de erro: {e2}")
     finally:
         if db:
             try:

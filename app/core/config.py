@@ -119,6 +119,16 @@ class Settings(BaseSettings):
     ANTHROPIC_API_KEY: str = ""
     CLAUDE_MODEL: str = "claude-sonnet-4-6"
 
+    # Geracao de imagem (ilustracao de conteudo). Camada trocavel:
+    # IMAGE_PROVIDER decide o adapter; hoje 'flux' (Flux via fal.ai).
+    # Sem FAL_API_KEY a busca de pictogramas ARASAAC continua funcionando;
+    # so a geracao por IA fica indisponivel (erro claro na rota).
+    IMAGE_PROVIDER: str = "flux"
+    FAL_API_KEY: str = ""
+    # Id do modelo no fal.ai. Deixado em config porque os ids mudam de versao;
+    # ajuste para o id atual do Flux Pro que voce contratar.
+    FLUX_MODEL: str = "fal-ai/flux-2-pro"
+
     # Email transacional (Resend) - usado para recuperacao de senha
     RESEND_API_KEY: str = ""
     EMAIL_FROM: str = "AdaptAI <onboarding@resend.dev>"

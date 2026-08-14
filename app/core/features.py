@@ -60,6 +60,9 @@ class F:
     REDACAO_TEMA = "redacao_tema"                  # redacao_ai_service.gerar_tema_atual
     DIARIO_RESUMO_SEMANAL = "diario_resumo_semanal"
     PLANO_AULA = "plano_aula"                      # plano_aula_ai_service
+    PROVA_CORRECAO_PAPEL = "prova_correcao_papel"  # prova_folha_service (modo papel)
+    REDACAO_PAPEL = "redacao_papel"                # redacao_folha_service (modo papel)
+    ILUSTRACAO_IA = "ilustracao_ia"                # ilustracao_service (prompt de imagem)
 
     @classmethod
     def all(cls) -> list[str]:

@@ -113,6 +113,14 @@ from app.models.ai_cache import AICache
 # Log de consumo de tokens da IA (contador por feature/aluno/usuario)
 from app.models.ai_usage_log import AIUsageLog
 
+# Ilustracoes (apoio visual: pictogramas ARASAAC + ilustracao IA)
+from app.models.ilustracao import (
+    Ilustracao,
+    ContextoIlustracao,
+    FonteIlustracao,
+    StatusIlustracao
+)
+
 
 __all__ = [
     # Multi-tenant
@@ -216,4 +224,10 @@ __all__ = [
 
     # Log de consumo de tokens da IA
     "AIUsageLog",
+
+    # Ilustracoes
+    "Ilustracao",
+    "ContextoIlustracao",
+    "FonteIlustracao",
+    "StatusIlustracao",
 ]

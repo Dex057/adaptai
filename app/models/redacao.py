@@ -128,3 +128,33 @@ class RedacaoAluno(Base):
     __table_args__ = (
         {'mysql_charset': 'utf8mb4', 'mysql_collate': 'utf8mb4_unicode_ci'},
     )
+
+
+class StatusFolhaRedacao(str, Enum):
+    """Status da folha de redacao respondida no papel (modo papel)."""
+    TRANSCRITA = "transcrita"    # IA leu; aguarda revisao do professor
+    CONFIRMADA = "confirmada"    # professor revisou e a correcao foi aplicada
+    ERRO = "erro"                # falha ao ler
+
+
+class RedacaoAlunoFolha(Base):
+    """Folha de redacao respondida no papel e fotografada (MODO PAPEL).
+
+    Pendura na RedacaoAluno. Guarda a imagem enviada e o texto transcrito pela
+    IA. A correcao por competencias so ocorre depois que o professor revisa e
+    confirma o texto.
+    """
+    __tablename__ = "redacoes_alunos_folhas"
+
+    id = Column(Integer, primary_key=True, index=True)
+    redacao_id = Column(Integer, ForeignKey("redacoes_alunos.id"), nullable=False)
+
+    imagem_path = Column(String(500), nullable=True)
+    texto_transcrito = Column(Text, nullable=True)
+    codigo_folha_detectado = Column(String(50), nullable=True)
+    status = Column(SQLEnum(StatusFolhaRedacao), default=StatusFolhaRedacao.TRANSCRITA)
+
+    criado_por_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    criado_em = Column(DateTime(timezone=True), server_default=func.now())
+
+    redacao = relationship("RedacaoAluno")

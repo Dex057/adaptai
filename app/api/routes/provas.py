@@ -4,10 +4,12 @@ Endpoints para gerenciamento de provas com IA
 
 ATUALIZADO: Aceita aluno_ids e adaptacoes para criar provas contextualizadas
 """
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Request
 from sqlalchemy.orm import Session, joinedload
 from typing import List
 from datetime import datetime, timezone
+from pathlib import Path
+from pydantic import BaseModel, Field
 
 from app.database import get_db, SessionLocal
 from app.models.user import User
@@ -17,6 +19,8 @@ from app.models.prova import (
     QuestaoGerada,
     ProvaAluno,
     RespostaAluno,
+    ProvaAlunoFolha,
+    StatusFolha,
     StatusProva,
     StatusProvaAluno,
     TipoQuestao
@@ -41,10 +45,15 @@ from app.schemas.prova import (
     QuestaoParaAluno
 )
 from app.services.prova_ai_service import prova_ai_service, ProvaIAError
+from app.services.prova_folha_service import transcrever_folha
 from app.api.dependencies import get_current_user, oauth2_scheme, get_user_from_token, verificar_acesso_aluno
 from app.core.tenant import enforce_limite_provas
+from app.core.logging_config import get_logger
+from app.core.rate_limit import check_rate_limit
 
 router = APIRouter(prefix="/provas")
+
+logger = get_logger(__name__)
 
 
 def _tipo_questao_valido(valor, padrao: TipoQuestao) -> TipoQuestao:
@@ -411,6 +420,343 @@ def listar_provas_do_aluno(
     ).all()
     
     return provas_aluno
+
+
+# ============= FOLHAS PARA IMPRESSAO (MODO PAPEL) =============
+
+@router.get("/{prova_id}/alunos")
+def listar_alunos_da_prova(
+    prova_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Lista os alunos associados a uma prova, para o professor escolher de quem
+    imprimir a folha (modo papel). Retorna o prova_aluno_id de cada um (que vai no
+    QR/codigo da folha) e o status atual da prova daquele aluno.
+    """
+    prova = db.query(Prova).filter(Prova.id == prova_id).first()
+    if not prova:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Prova nao encontrada")
+    _verificar_acesso_prova(prova, current_user)
+
+    provas_alunos = db.query(ProvaAluno).filter(ProvaAluno.prova_id == prova_id).all()
+    resultado = []
+    for pa in provas_alunos:
+        aluno = pa.aluno
+        resultado.append({
+            "prova_aluno_id": pa.id,
+            "aluno_id": pa.aluno_id,
+            "aluno_nome": aluno.name if aluno else None,
+            "aluno_serie": aluno.grade_level if aluno else None,
+            "status": pa.status.value if pa.status else None,
+            "codigo_folha": "PA-%06d" % pa.id,
+        })
+    return resultado
+
+
+@router.get("/aluno/{prova_aluno_id}/folha-impressao")
+def obter_folha_impressao(
+    prova_aluno_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Dados da folha para impressao (modo papel).
+
+    Retorna a prova de um aluno em formato imprimivel: cabecalho (aluno + prova),
+    questoes COM opcoes mas SEM gabarito, e o codigo que vai no QR da folha
+    (prova_aluno_id). A leitura de volta (foto -> IA) usa esse codigo para casar a
+    folha com o aluno certo. Reusa a checagem de dono (_verificar_acesso_prova).
+    """
+    prova_aluno = db.query(ProvaAluno).filter(ProvaAluno.id == prova_aluno_id).first()
+    if not prova_aluno:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Prova do aluno nao encontrada",
+        )
+    _verificar_acesso_prova(prova_aluno.prova, current_user)
+
+    prova = prova_aluno.prova
+    aluno = prova_aluno.aluno
+    questoes = sorted(prova.questoes, key=lambda q: q.numero or 0)
+
+    return {
+        "prova_aluno_id": prova_aluno.id,
+        "codigo_folha": "PA-%06d" % prova_aluno.id,
+        "prova": {
+            "id": prova.id,
+            "titulo": prova.titulo,
+            "materia": prova.materia,
+            "serie_nivel": prova.serie_nivel,
+            "instrucoes": prova.descricao,
+            "tempo_limite_minutos": prova.tempo_limite_minutos,
+            "pontuacao_total": prova.pontuacao_total,
+        },
+        "aluno": {
+            "id": aluno.id if aluno else None,
+            "nome": aluno.name if aluno else None,
+            "serie": aluno.grade_level if aluno else None,
+        },
+        "questoes": [
+            {
+                "id": q.id,
+                "numero": q.numero,
+                "enunciado": q.enunciado,
+                "tipo": q.tipo.value if hasattr(q.tipo, "value") else q.tipo,
+                "opcoes": q.opcoes,
+                "pontuacao": q.pontuacao,
+            }
+            for q in questoes
+        ],
+    }
+
+
+@router.post("/aluno/{prova_aluno_id}/folha")
+async def enviar_folha_respondida(
+    prova_aluno_id: int,
+    request: Request,
+    arquivo: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Recebe a FOTO/scan da folha respondida no papel e usa Claude Vision para
+    transcrever o que o aluno marcou/escreveu. NAO corrige ainda - guarda a
+    transcricao para o professor revisar e confirmar depois (Fase 3).
+    """
+    check_rate_limit(
+        request, key="modo_papel_ler", max_requests=60, window_seconds=3600,
+        error_message="Muitos envios de foto em pouco tempo. Aguarde um instante.",
+    )
+    prova_aluno = db.query(ProvaAluno).filter(ProvaAluno.id == prova_aluno_id).first()
+    if not prova_aluno:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Prova do aluno nao encontrada")
+    _verificar_acesso_prova(prova_aluno.prova, current_user)
+
+    content_type = (arquivo.content_type or "").lower()
+    tipos_ok = {"image/jpeg", "image/jpg", "image/png", "image/webp", "application/pdf"}
+    if content_type not in tipos_ok:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Envie uma imagem (JPEG, PNG, WEBP) ou PDF da folha.",
+        )
+
+    conteudo = await arquivo.read()
+    if not conteudo:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Arquivo vazio.")
+    if len(conteudo) > 15 * 1024 * 1024:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Arquivo muito grande (max 15 MB).")
+
+    # Registro primeiro, para ter um id no nome do arquivo.
+    folha = ProvaAlunoFolha(
+        prova_aluno_id=prova_aluno_id,
+        status=StatusFolha.TRANSCRITA,
+        criado_por_id=current_user.id,
+    )
+    db.add(folha)
+    db.flush()
+
+    ext = {
+        "image/jpeg": "jpg", "image/jpg": "jpg", "image/png": "png",
+        "image/webp": "webp", "application/pdf": "pdf",
+    }.get(content_type, "bin")
+
+    # Pasta protegida (NAO montada como estatico): backend/storage/provas_folhas/
+    pasta = Path(__file__).resolve().parents[3] / "storage" / "provas_folhas"
+    pasta.mkdir(parents=True, exist_ok=True)
+    nome_arquivo = "%d_%d.%s" % (prova_aluno_id, folha.id, ext)
+    with open(pasta / nome_arquivo, "wb") as f:
+        f.write(conteudo)
+    folha.imagem_path = nome_arquivo
+
+    # Lista de questoes para orientar a leitura (numero, tipo, opcoes).
+    questoes = sorted(prova_aluno.prova.questoes, key=lambda q: q.numero or 0)
+    questoes_payload = [
+        {
+            "numero": q.numero,
+            "tipo": q.tipo.value if hasattr(q.tipo, "value") else q.tipo,
+            "opcoes": q.opcoes,
+        }
+        for q in questoes
+    ]
+
+    try:
+        transcricao = transcrever_folha(conteudo, content_type, questoes_payload)
+    except Exception:
+        folha.status = StatusFolha.ERRO
+        db.commit()
+        logger.exception("Falha ao transcrever folha com IA (prova_aluno_id=%s)", prova_aluno_id)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Nao foi possivel ler a folha agora. Tente novamente em instantes.",
+        )
+
+    folha.transcricao_json = transcricao
+    folha.codigo_folha_detectado = (transcricao or {}).get("codigo_folha_detectado")
+    db.commit()
+    db.refresh(folha)
+
+    return {
+        "folha_id": folha.id,
+        "prova_aluno_id": prova_aluno_id,
+        "status": folha.status.value,
+        "codigo_folha_detectado": folha.codigo_folha_detectado,
+        "transcricao": folha.transcricao_json,
+    }
+
+
+class RespostaFolhaItem(BaseModel):
+    """Uma resposta revisada pelo professor (por numero de questao)."""
+    numero: int = Field(..., gt=0)
+    resposta: str = Field(default="", max_length=5000)
+
+
+class ConfirmarFolhaRequest(BaseModel):
+    respostas: List[RespostaFolhaItem]
+
+
+@router.post("/aluno/{prova_aluno_id}/folha/{folha_id}/confirmar")
+async def confirmar_folha(
+    prova_aluno_id: int,
+    folha_id: int,
+    request: Request,
+    payload: ConfirmarFolhaRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Aplica a transcricao (ja revisada pelo professor) e corrige a prova.
+
+    Grava as respostas (uma por questao) e reusa a MESMA logica das provas online:
+    objetivas comparam com o gabarito; dissertativas ficam pendentes para o
+    professor. Calcula a nota e, se nao houver pendencia, gera analise + feedback.
+    """
+    check_rate_limit(
+        request, key="modo_papel_corrigir", max_requests=60, window_seconds=3600,
+        error_message="Muitas correções em pouco tempo. Aguarde um instante.",
+    )
+    prova_aluno = db.query(ProvaAluno).filter(ProvaAluno.id == prova_aluno_id).first()
+    if not prova_aluno:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Prova do aluno nao encontrada")
+    _verificar_acesso_prova(prova_aluno.prova, current_user)
+
+    folha = db.query(ProvaAlunoFolha).filter(
+        ProvaAlunoFolha.id == folha_id,
+        ProvaAlunoFolha.prova_aluno_id == prova_aluno_id,
+    ).first()
+    if not folha:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Folha nao encontrada")
+
+    prova = prova_aluno.prova
+    questoes_por_numero = {q.numero: q for q in prova.questoes}
+
+    for item in payload.respostas:
+        questao = questoes_por_numero.get(item.numero)
+        if not questao:
+            continue
+        resposta_texto = (item.resposta or "").strip()
+        if questao.resposta_correta is None:
+            esta_correta = None
+            pontos = 0.0
+        else:
+            esta_correta = resposta_texto.upper() == questao.resposta_correta.strip().upper()
+            pontos = questao.pontuacao if esta_correta else 0.0
+
+        existente = db.query(RespostaAluno).filter(
+            RespostaAluno.prova_aluno_id == prova_aluno_id,
+            RespostaAluno.questao_id == questao.id,
+        ).first()
+        if existente:
+            existente.resposta_aluno = resposta_texto
+            existente.esta_correta = esta_correta
+            existente.pontuacao_obtida = pontos
+            existente.pontuacao_maxima = questao.pontuacao
+        else:
+            db.add(RespostaAluno(
+                prova_aluno_id=prova_aluno_id,
+                questao_id=questao.id,
+                resposta_aluno=resposta_texto,
+                esta_correta=esta_correta,
+                pontuacao_obtida=pontos,
+                pontuacao_maxima=questao.pontuacao,
+            ))
+
+    db.flush()
+
+    respostas = db.query(RespostaAluno).filter(
+        RespostaAluno.prova_aluno_id == prova_aluno_id
+    ).all()
+    pendentes = [r for r in respostas if r.esta_correta is None]
+    pontuacao_obtida = sum((r.pontuacao_obtida or 0) for r in respostas)
+    pontuacao_corrigivel = sum(
+        (r.pontuacao_maxima or 0) for r in respostas if r.esta_correta is not None
+    )
+    nota_minima = prova.nota_minima_aprovacao or 6.0
+    if pontuacao_corrigivel > 0:
+        nota_final = (pontuacao_obtida / pontuacao_corrigivel) * 10
+        atingiu = nota_final >= nota_minima
+        aprovado = atingiu if not pendentes else (True if atingiu else None)
+    else:
+        nota_final = None
+        aprovado = None
+
+    agora = datetime.now(timezone.utc)
+    prova_aluno.status = StatusProvaAluno.CONCLUIDA if pendentes else StatusProvaAluno.CORRIGIDA
+    prova_aluno.data_conclusao = prova_aluno.data_conclusao or agora
+    prova_aluno.data_correcao = None if pendentes else agora
+    prova_aluno.pontuacao_obtida = pontuacao_obtida
+    prova_aluno.pontuacao_maxima = pontuacao_corrigivel
+    prova_aluno.nota_final = nota_final
+    prova_aluno.aprovado = aprovado
+
+    folha.status = StatusFolha.CONFIRMADA
+    db.commit()
+    db.refresh(prova_aluno)
+
+    analise = {}
+    feedback = None
+    if not pendentes:
+        try:
+            aluno = prova_aluno.aluno
+            questoes_lista = [
+                {"numero": q.numero, "enunciado": q.enunciado, "resposta_correta": q.resposta_correta}
+                for q in prova.questoes
+            ]
+            respostas_map = {r.questao_id: r for r in respostas}
+            respostas_lista = [
+                {
+                    "questao_numero": q.numero,
+                    "resposta_aluno": respostas_map[q.id].resposta_aluno if q.id in respostas_map else "",
+                    "esta_correta": respostas_map[q.id].esta_correta if q.id in respostas_map else None,
+                }
+                for q in prova.questoes
+            ]
+            aluno_info = {
+                "nome": aluno.name,
+                "serie": aluno.grade_level,
+                "diagnosticos": aluno.diagnosis or {},
+            }
+            analise = await prova_ai_service.analisar_desempenho(
+                questoes=questoes_lista, respostas=respostas_lista, aluno_info=aluno_info
+            )
+            feedback = await prova_ai_service.gerar_feedback_personalizado(
+                questoes=questoes_lista, respostas=respostas_lista, analise=analise, aluno_info=aluno_info
+            )
+            prova_aluno.analise_ia = analise
+            prova_aluno.feedback_ia = feedback
+            db.commit()
+        except Exception:
+            logger.exception("Falha na analise IA da folha (prova_aluno_id=%s)", prova_aluno_id)
+
+    acertos = sum(1 for r in respostas if r.esta_correta)
+    return {
+        "prova_aluno_id": prova_aluno_id,
+        "folha_id": folha_id,
+        "status": prova_aluno.status.value,
+        "nota_final": round(nota_final, 2) if nota_final is not None else None,
+        "aprovado": aprovado,
+        "acertos": acertos,
+        "total_questoes": len(respostas),
+        "questoes_aguardando_correcao": len(pendentes),
+        "feedback_ia": feedback,
+    }
 
 
 # ============= ENDPOINTS DO ALUNO =============

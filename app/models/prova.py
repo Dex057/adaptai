@@ -182,3 +182,33 @@ class RespostaAluno(Base):
     # Relacionamentos
     prova_aluno = relationship("ProvaAluno", back_populates="respostas")
     questao = relationship("QuestaoGerada", back_populates="respostas")
+
+
+class StatusFolha(str, enum.Enum):
+    """Status da folha de prova respondida no papel (modo papel)."""
+    TRANSCRITA = "transcrita"    # IA leu; aguarda revisao do professor
+    CONFIRMADA = "confirmada"    # professor revisou e a correcao foi aplicada
+    ERRO = "erro"                # falha ao ler
+
+
+class ProvaAlunoFolha(Base):
+    """Folha de uma prova respondida no papel e fotografada (MODO PAPEL).
+
+    Pendura na tentativa do aluno (ProvaAluno). Guarda a imagem enviada e a
+    transcricao da IA (o que o aluno marcou/escreveu por questao). A correcao
+    so acontece depois que o professor revisa e confirma (Fase 3).
+    """
+    __tablename__ = "provas_alunos_folhas"
+
+    id = Column(Integer, primary_key=True, index=True)
+    prova_aluno_id = Column(Integer, ForeignKey('provas_alunos.id'), nullable=False)
+
+    imagem_path = Column(String(500))
+    transcricao_json = Column(JSON)
+    codigo_folha_detectado = Column(String(50))
+    status = Column(SQLEnum(StatusFolha), default=StatusFolha.TRANSCRITA)
+
+    criado_por_id = Column(Integer, ForeignKey('users.id'))
+    criado_em = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    prova_aluno = relationship("ProvaAluno")

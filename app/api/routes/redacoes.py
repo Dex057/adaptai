@@ -2,7 +2,7 @@
 📝 AdaptAI - Rotas de Redação ENEM
 Endpoints para gerenciamento de redações com correção por IA
 """
-from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi import APIRouter, Depends, HTTPException, status, Request, UploadFile, File
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from typing import List
@@ -27,11 +27,18 @@ from app.schemas.redacao import (
     HistoricoRedacoesResponse
 )
 from app.services.redacao_ai_service import redacao_ai_service
+from app.services.redacao_folha_service import transcrever_redacao
 from app.api.dependencies import get_current_user, oauth2_scheme, get_user_from_token, verificar_acesso_aluno
 from app.core.pagination import PaginationParams, build_page
 from app.core.rate_limit import check_rate_limit
+from app.core.logging_config import get_logger
+from app.models.redacao import RedacaoAlunoFolha, StatusFolhaRedacao
+from pathlib import Path
+from pydantic import BaseModel, Field
 
 router = APIRouter(prefix="/redacoes", tags=["Redações ENEM"])
+
+logger = get_logger(__name__)
 
 
 # ============================================
@@ -808,3 +815,281 @@ def obter_resultado_redacao(
     }
     
     return resultado
+
+
+
+# ============================================
+# MODO PAPEL - REDACAO NA FOLHA (imprimir, ler foto, revisar, corrigir)
+# ============================================
+
+def _carregar_redacao_do_professor(db, redacao_id, current_user):
+    """Carrega a RedacaoAluno validando acesso ao aluno (anti-IDOR)."""
+    redacao = db.query(RedacaoAluno).filter(RedacaoAluno.id == redacao_id).first()
+    if not redacao:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Redação não encontrada")
+    verificar_acesso_aluno(db, redacao.aluno_id, current_user)
+    return redacao
+
+
+@router.get("/temas/{tema_id}/folhas")
+def listar_folhas_do_tema(
+    tema_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Lista as redacoes (alunos) de um tema para o professor escolher de quem
+    imprimir/enviar a folha (modo papel). Filtra pelos alunos acessiveis."""
+    tema = db.query(TemaRedacao).filter(TemaRedacao.id == tema_id).first()
+    if not tema:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tema não encontrado")
+
+    redacoes = db.query(RedacaoAluno).filter(RedacaoAluno.tema_id == tema_id).all()
+    resultado = []
+    for r in redacoes:
+        try:
+            aluno = verificar_acesso_aluno(db, r.aluno_id, current_user)
+        except HTTPException:
+            continue
+        resultado.append({
+            "redacao_id": r.id,
+            "aluno_id": r.aluno_id,
+            "aluno_nome": aluno.name,
+            "aluno_serie": aluno.grade_level,
+            "status": r.status.value if r.status else None,
+            "codigo_folha": "RA-%06d" % r.id,
+        })
+    return resultado
+
+
+@router.get("/aluno/{redacao_id}/folha-impressao")
+def obter_folha_impressao_redacao(
+    redacao_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Dados para imprimir a folha de redacao: tema/proposta + textos motivadores
+    e espaco pautado. O QR/codigo carrega o redacao_id."""
+    redacao = _carregar_redacao_do_professor(db, redacao_id, current_user)
+    tema = redacao.tema
+    aluno = redacao.aluno
+    return {
+        "redacao_id": redacao.id,
+        "codigo_folha": "RA-%06d" % redacao.id,
+        "tema": {
+            "titulo": tema.titulo,
+            "proposta": tema.proposta,
+            "texto_motivador_1": tema.texto_motivador_1,
+            "texto_motivador_2": tema.texto_motivador_2,
+            "texto_motivador_3": tema.texto_motivador_3,
+            "texto_motivador_4": tema.texto_motivador_4,
+            "area_tematica": tema.area_tematica,
+        },
+        "aluno": {
+            "id": aluno.id if aluno else None,
+            "nome": aluno.name if aluno else None,
+            "serie": aluno.grade_level if aluno else None,
+        },
+    }
+
+
+@router.post("/aluno/{redacao_id}/folha")
+async def enviar_folha_redacao(
+    redacao_id: int,
+    request: Request,
+    arquivo: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Recebe a foto/scan da redacao manuscrita e usa Claude Vision para
+    transcrever o texto (NAO corrige). Guarda para o professor revisar."""
+    check_rate_limit(
+        request, key="modo_papel_redacao_ler", max_requests=60, window_seconds=3600,
+        error_message="Muitos envios de foto em pouco tempo. Aguarde um instante.",
+    )
+    redacao = _carregar_redacao_do_professor(db, redacao_id, current_user)
+
+    content_type = (arquivo.content_type or "").lower()
+    tipos_ok = {"image/jpeg", "image/jpg", "image/png", "image/webp", "application/pdf"}
+    if content_type not in tipos_ok:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Envie uma imagem (JPEG, PNG, WEBP) ou PDF da redação.",
+        )
+
+    conteudo = await arquivo.read()
+    if not conteudo:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Arquivo vazio.")
+    if len(conteudo) > 15 * 1024 * 1024:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Arquivo muito grande (max 15 MB).")
+
+    folha = RedacaoAlunoFolha(
+        redacao_id=redacao_id,
+        status=StatusFolhaRedacao.TRANSCRITA,
+        criado_por_id=current_user.id,
+    )
+    db.add(folha)
+    db.flush()
+
+    ext = {
+        "image/jpeg": "jpg", "image/jpg": "jpg", "image/png": "png",
+        "image/webp": "webp", "application/pdf": "pdf",
+    }.get(content_type, "bin")
+    pasta = Path(__file__).resolve().parents[3] / "storage" / "redacoes_folhas"
+    pasta.mkdir(parents=True, exist_ok=True)
+    nome_arquivo = "%d_%d.%s" % (redacao_id, folha.id, ext)
+    with open(pasta / nome_arquivo, "wb") as f:
+        f.write(conteudo)
+    folha.imagem_path = nome_arquivo
+
+    try:
+        transcricao = transcrever_redacao(conteudo, content_type)
+    except Exception:
+        folha.status = StatusFolhaRedacao.ERRO
+        db.commit()
+        logger.exception("Falha ao transcrever redação (redacao_id=%s)", redacao_id)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Nao foi possivel ler a redação agora. Tente novamente em instantes.",
+        )
+
+    folha.texto_transcrito = (transcricao or {}).get("texto")
+    folha.codigo_folha_detectado = (transcricao or {}).get("codigo_folha_detectado")
+    db.commit()
+    db.refresh(folha)
+
+    return {
+        "folha_id": folha.id,
+        "redacao_id": redacao_id,
+        "status": folha.status.value,
+        "codigo_folha_detectado": folha.codigo_folha_detectado,
+        "texto": folha.texto_transcrito or "",
+        "observacoes": (transcricao or {}).get("observacoes", ""),
+    }
+
+
+class ConfirmarFolhaRedacaoRequest(BaseModel):
+    texto: str = Field(..., min_length=1)
+
+
+@router.post("/aluno/{redacao_id}/folha/{folha_id}/confirmar", response_model=CorrecaoENEMResponse)
+async def confirmar_folha_redacao(
+    redacao_id: int,
+    folha_id: int,
+    request: Request,
+    payload: ConfirmarFolhaRedacaoRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Aplica o texto revisado pelo professor e corrige por competencias do ENEM
+    (reuso de redacao_ai_service.corrigir_redacao_enem)."""
+    check_rate_limit(
+        request, key="modo_papel_redacao_corrigir", max_requests=60, window_seconds=3600,
+        error_message="Muitas correções em pouco tempo. Aguarde um instante.",
+    )
+    redacao = _carregar_redacao_do_professor(db, redacao_id, current_user)
+    folha = db.query(RedacaoAlunoFolha).filter(
+        RedacaoAlunoFolha.id == folha_id,
+        RedacaoAlunoFolha.redacao_id == redacao_id,
+    ).first()
+    if not folha:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Folha não encontrada")
+
+    texto = (payload.texto or "").strip()
+    palavras = len(texto.split())
+    if palavras < 20:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Texto muito curto para corrigir ({palavras} palavras). Revise a transcrição.",
+        )
+
+    tema = redacao.tema
+    aluno = redacao.aluno
+    tema_data = {
+        "titulo": tema.titulo,
+        "tema": tema.tema,
+        "proposta": tema.proposta,
+        "texto_motivador_1": tema.texto_motivador_1,
+        "texto_motivador_2": tema.texto_motivador_2,
+        "texto_motivador_3": tema.texto_motivador_3,
+    }
+    aluno_info = {
+        "nome": aluno.name,
+        "serie": aluno.grade_level,
+        "diagnostico": aluno.diagnosis,
+    } if aluno else None
+
+    try:
+        correcao = await redacao_ai_service.corrigir_redacao_enem(
+            texto_redacao=texto, tema=tema_data, aluno_info=aluno_info
+        )
+    except Exception:
+        logger.exception("Falha na correção IA da redação (redacao_id=%s)", redacao_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Erro ao corrigir a redação. Tente novamente.",
+        )
+
+    agora = datetime.now(timezone.utc)
+    redacao.texto = texto
+    redacao.quantidade_palavras = palavras
+    redacao.quantidade_linhas = len([ln for ln in texto.split("\n") if ln.strip()])
+    redacao.nota_competencia_1 = correcao.get("nota_competencia_1", 0)
+    redacao.nota_competencia_2 = correcao.get("nota_competencia_2", 0)
+    redacao.nota_competencia_3 = correcao.get("nota_competencia_3", 0)
+    redacao.nota_competencia_4 = correcao.get("nota_competencia_4", 0)
+    redacao.nota_competencia_5 = correcao.get("nota_competencia_5", 0)
+    redacao.nota_final = correcao.get("nota_final", 0)
+    redacao.feedback_competencia_1 = correcao.get("feedback_competencia_1", "")
+    redacao.feedback_competencia_2 = correcao.get("feedback_competencia_2", "")
+    redacao.feedback_competencia_3 = correcao.get("feedback_competencia_3", "")
+    redacao.feedback_competencia_4 = correcao.get("feedback_competencia_4", "")
+    redacao.feedback_competencia_5 = correcao.get("feedback_competencia_5", "")
+    redacao.feedback_geral = correcao.get("feedback_geral", "")
+    redacao.pontos_fortes = correcao.get("pontos_fortes", [])
+    redacao.pontos_melhoria = correcao.get("pontos_melhoria", [])
+    redacao.sugestoes = correcao.get("sugestoes", [])
+    redacao.analise_detalhada = correcao
+    redacao.status = StatusRedacao.CORRIGIDA
+    redacao.submetido_em = redacao.submetido_em or agora
+    redacao.corrigido_em = agora
+
+    folha.status = StatusFolhaRedacao.CONFIRMADA
+    db.commit()
+
+    nomes_competencias = [
+        "Domínio da Norma Culta",
+        "Compreensão da Proposta",
+        "Argumentação",
+        "Coesão Textual",
+        "Proposta de Intervenção",
+    ]
+    descricoes = [
+        "Demonstrar domínio da modalidade escrita formal da língua portuguesa",
+        "Compreender a proposta e aplicar conceitos das várias áreas de conhecimento",
+        "Selecionar, relacionar, organizar e interpretar informações e argumentos",
+        "Demonstrar conhecimento dos mecanismos linguísticos para construção da argumentação",
+        "Elaborar proposta de intervenção para o problema, respeitando os direitos humanos",
+    ]
+    competencias = []
+    for i in range(1, 6):
+        competencias.append(CompetenciaENEM(
+            numero=i,
+            nome=nomes_competencias[i - 1],
+            descricao=descricoes[i - 1],
+            nota=correcao.get(f"nota_competencia_{i}", 0),
+            nivel=correcao.get(f"nivel_competencia_{i}", ""),
+            feedback=correcao.get(f"feedback_competencia_{i}", ""),
+            descritor_nivel=correcao.get(f"descritor_competencia_{i}"),
+            criterios=correcao.get(f"criterios_competencia_{i}"),
+        ))
+
+    return CorrecaoENEMResponse(
+        redacao_id=redacao.id,
+        nota_final=correcao.get("nota_final", 0),
+        competencias=competencias,
+        feedback_geral=correcao.get("feedback_geral", ""),
+        pontos_fortes=correcao.get("pontos_fortes", []),
+        pontos_melhoria=correcao.get("pontos_melhoria", []),
+        sugestoes=correcao.get("sugestoes", []),
+        nivel_geral=correcao.get("nivel_geral", ""),
+    )

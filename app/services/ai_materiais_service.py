@@ -527,6 +527,7 @@ Retorne APENAS o JSON."""
         """Gera álbum de figurinhas educativo"""
         prompt = f"""Criar ÁLBUM DE FIGURINHAS sobre "{conteudo}" ({disciplina}, {serie}).
 Coleção de "figurinhas" com informações para colecionar.
+2-3 categorias, 4-6 figurinhas cada (máximo 12 figurinhas no total).
 
 FORMATO JSON:
 {{
@@ -551,7 +552,17 @@ FORMATO JSON:
   "desafio_completar": "Meta ao completar o álbum"
 }}
 Retorne APENAS o JSON."""
-        resultado = self._chamar_ia(prompt, 3072)
+        # 2026-08-15: 3072 tokens truncava. Diferente de hq_tirinha (4-6
+        # quadrinhos, cabe em 3072), o prompt do album nao tinha teto de
+        # categorias/figurinhas — a IA podia gerar um album generoso (varias
+        # categorias x varias figurinhas x 5 campos de texto cada) que
+        # estourava o limite, json.loads() quebrava (JSONDecodeError), e como
+        # o professor normalmente pede so este tipo, "nenhum material pode
+        # ser gerado" -> 422 pro album inteiro. Mesmo padrao de truncamento ja
+        # visto em ficha_leitura/resumo_estruturado/texto_niveis. Corrigido
+        # nos dois lados: teto explicito no prompt acima (bate com
+        # MAX_IMAGENS_ALBUM) + mais headroom aqui.
+        resultado = self._chamar_ia(prompt, 6144, cache_type="album_figurinhas")
         # 2026-08-15: cada figurinha ganha uma ilustracao de verdade (Flux via
         # fal.ai) a partir de `imagem_descricao` — antes so o texto existia.
         # As figurinhas ficam aninhadas em categorias[]; achata pra aplicar o

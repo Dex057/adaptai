@@ -5,7 +5,9 @@ Orquestra a parte "inteligente" da geracao de imagem:
   1) o Claude escreve um PROMPT visual em pt-BR a partir do conteudo (material,
      questao ou tema de redacao), num estilo consistente e apropriado a criancas;
   2) o provedor de imagem (image_providers) transforma o prompt em bytes;
-  3) o arquivo e salvo em backend/storage/ilustracoes/ (rota protegida serve).
+  3) a ROTA grava os bytes em Ilustracao.imagem_bytes (banco, nao disco - o
+     servico web do Railway nao tem volume persistente; um arquivo em
+     storage/ilustracoes/ sumia no proximo deploy).
 
 Publico do AdaptAI: alunos com TEA/TDAH/dislexia, muitos menores de idade. Por
 isso o prompt de estilo forca ilustracao limpa, acolhedora, SEM texto embutido
@@ -16,7 +18,6 @@ A imagem pertence ao CONTEUDO (ver model Ilustracao) - gerada uma vez, reusada
 por toda a turma.
 """
 import time
-from pathlib import Path
 from typing import Optional
 
 import tokenmeter as tm
@@ -29,10 +30,6 @@ from app.services.image_providers import (ErroGeracaoImagem,
                                            get_image_provider)
 
 logger = get_logger(__name__)
-
-# Pasta protegida (NAO montada como estatico), no mesmo padrao das folhas de
-# prova (backend/storage/...). A rota GET /ilustracoes/{id}/imagem serve o arquivo.
-STORAGE_DIR = Path(__file__).resolve().parents[2] / "storage" / "ilustracoes"
 
 # Rotulo humano de cada contexto, so para orientar o Claude na hora do prompt.
 _CONTEXTO_LABEL = {
@@ -47,20 +44,6 @@ _ESTILO = (
     "clean simple background, child-friendly, inclusive, high clarity, "
     "no text, no words, no letters, educational, calm"
 )
-
-
-def caminho_storage() -> Path:
-    STORAGE_DIR.mkdir(parents=True, exist_ok=True)
-    return STORAGE_DIR
-
-
-def salvar_bytes(ilustracao_id: int, image_bytes: bytes, ext: str = "png") -> str:
-    """Salva os bytes e devolve o NOME do arquivo (nao o caminho absoluto)."""
-    pasta = caminho_storage()
-    nome_arquivo = "%d.%s" % (int(ilustracao_id), ext)
-    with open(pasta / nome_arquivo, "wb") as f:
-        f.write(image_bytes)
-    return nome_arquivo
 
 
 @tm.feature(F.ILUSTRACAO_IA)

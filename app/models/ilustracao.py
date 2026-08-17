@@ -12,7 +12,8 @@ REGRA DE PROPRIEDADE (conteudo x ponte): a ilustracao pertence ao CONTEUDO
 (material/questao/tema), NUNCA ao aluno. Assim ela e gerada uma vez e
 reaproveitada por toda a turma - o custo por imagem nao se multiplica por aluno.
 """
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Enum as SQLEnum
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Enum as SQLEnum, LargeBinary
+from sqlalchemy.dialects.mysql import MEDIUMBLOB
 from datetime import datetime, timezone
 import enum
 from app.database import Base
@@ -63,7 +64,19 @@ class Ilustracao(Base):
     arasaac_id = Column(Integer, nullable=True)
     imagem_url = Column(String(1000), nullable=True)
 
-    # IA: nome do arquivo salvo em storage/ilustracoes/ + prompt usado (auditoria).
+    # IA: bytes da imagem gravados NO PROPRIO BANCO (nao em disco) - o servico
+    # web do Railway roda em disco efemero, sem volume persistente; um arquivo
+    # em storage/ilustracoes/ sumia no proximo deploy enquanto esta linha
+    # continuava dizendo status=PRONTA (ver docs/CORRECOES-2026-08-11.md).
+    # MEDIUMBLOB (ate 16MB) sobra folgado para um PNG de ~150-400KB. Variante
+    # SQLite (LargeBinary generico) porque testes/dev usam SQLite via
+    # create_all() - sem isso, MEDIUMBLOB nao compila fora do MySQL e
+    # Base.metadata.create_all() falha, derrubando toda a suite (silenciosamente,
+    # via pytest.skip no conftest - achado no code review antes do commit).
+    imagem_bytes = Column(MEDIUMBLOB().with_variant(LargeBinary, "sqlite"), nullable=True)
+    # legado: nome do arquivo que ERA salvo em storage/ilustracoes/. Mantido
+    # so para auditoria de linhas antigas (o arquivo em si ja nao existe mais
+    # em produção) - nao e mais escrito por codigo novo.
     imagem_path = Column(String(500), nullable=True)
     prompt_ia = Column(Text, nullable=True)
 

@@ -13,7 +13,7 @@ aluno. Toda rota verifica que o professor e dono do conteudo antes de ler/gravar
 from typing import List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, status, Request, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -48,8 +48,6 @@ _CONTEXTOS = {
     "questao": ContextoIlustracao.QUESTAO,
     "redacao_tema": ContextoIlustracao.REDACAO_TEMA,
 }
-
-_EXT_MEDIA = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "webp": "image/webp"}
 
 
 def _mapear_contexto(contexto_tipo: str) -> ContextoIlustracao:
@@ -274,8 +272,7 @@ def criar_ilustracao(
                 detail="Erro ao gerar a ilustracao.",
             )
 
-        nome_arquivo = ilustracao_service.salvar_bytes(ilus.id, image_bytes, ext="png")
-        ilus.imagem_path = nome_arquivo
+        ilus.imagem_bytes = image_bytes
         ilus.prompt_ia = prompt
         ilus.status = StatusIlustracao.PRONTA
         db.commit()
@@ -300,17 +297,13 @@ def servir_imagem(
     # Valida acesso ao conteudo dono da ilustracao.
     _resolver_conteudo(db, ilus.contexto_tipo, ilus.contexto_id, current_user)
 
-    if ilus.fonte != FonteIlustracao.IA or not ilus.imagem_path:
-        # ARASAAC nao passa por aqui (a imagem esta no CDN).
-        raise HTTPException(status_code=404, detail="Sem arquivo local para esta ilustracao.")
+    if ilus.fonte != FonteIlustracao.IA or not ilus.imagem_bytes:
+        # ARASAAC nao passa por aqui (a imagem esta no CDN). Linhas antigas
+        # (geradas antes da migracao para o banco) tambem caem aqui - o
+        # arquivo delas em disco ja nao existe mais (storage efemero).
+        raise HTTPException(status_code=404, detail="Imagem da ilustracao nao encontrada.")
 
-    caminho = ilustracao_service.caminho_storage() / ilus.imagem_path
-    if not caminho.exists():
-        raise HTTPException(status_code=404, detail="Arquivo da ilustracao nao encontrado.")
-
-    ext = ilus.imagem_path.rsplit(".", 1)[-1].lower()
-    media = _EXT_MEDIA.get(ext, "image/png")
-    return FileResponse(str(caminho), media_type=media)
+    return Response(content=bytes(ilus.imagem_bytes), media_type="image/png")
 
 
 # --------------------------------------------------------------------------- #
@@ -327,15 +320,8 @@ def remover_ilustracao(
         raise HTTPException(status_code=404, detail="Ilustracao nao encontrada.")
     _resolver_conteudo(db, ilus.contexto_tipo, ilus.contexto_id, current_user)
 
-    # Remove o arquivo local (IA), best-effort - nao falha a exclusao por isso.
-    if ilus.fonte == FonteIlustracao.IA and ilus.imagem_path:
-        try:
-            caminho = ilustracao_service.caminho_storage() / ilus.imagem_path
-            if caminho.exists():
-                caminho.unlink()
-        except Exception:
-            logger.warning("Nao foi possivel apagar o arquivo da ilustracao %s", ilustracao_id, exc_info=True)
-
+    # Imagem IA mora na propria linha (imagem_bytes) - apagar a linha basta,
+    # nao ha mais arquivo em disco pra limpar separadamente.
     db.delete(ilus)
     db.commit()
     return None

@@ -5,7 +5,9 @@ Orquestra a parte "inteligente" da geracao de imagem:
   1) o Claude escreve um PROMPT visual em pt-BR a partir do conteudo (material,
      questao ou tema de redacao), num estilo consistente e apropriado a criancas;
   2) o provedor de imagem (image_providers) transforma o prompt em bytes;
-  3) o arquivo e salvo em backend/storage/ilustracoes/ (rota protegida serve).
+  3) a ROTA grava os bytes em Ilustracao.imagem_bytes (banco, nao disco - o
+     servico web do Railway nao tem volume persistente; um arquivo em
+     storage/ilustracoes/ sumia no proximo deploy).
 
 Publico do AdaptAI: alunos com TEA/TDAH/dislexia, muitos menores de idade. Por
 isso o prompt de estilo forca ilustracao limpa, acolhedora, SEM texto embutido
@@ -15,7 +17,7 @@ por uma instrucao de seguranca explicita. O provedor ainda roda o proprio filtro
 A imagem pertence ao CONTEUDO (ver model Ilustracao) - gerada uma vez, reusada
 por toda a turma.
 """
-from pathlib import Path
+import time
 from typing import Optional
 
 import tokenmeter as tm
@@ -23,13 +25,11 @@ import tokenmeter as tm
 from app.core.anthropic_client import get_anthropic_client, get_fast_model
 from app.core.features import F
 from app.core.logging_config import get_logger
-from app.services.image_providers import get_image_provider
+from app.services.image_providers import (ErroGeracaoImagem,
+                                           ProvedorImagemIndisponivel,
+                                           get_image_provider)
 
 logger = get_logger(__name__)
-
-# Pasta protegida (NAO montada como estatico), no mesmo padrao das folhas de
-# prova (backend/storage/...). A rota GET /ilustracoes/{id}/imagem serve o arquivo.
-STORAGE_DIR = Path(__file__).resolve().parents[2] / "storage" / "ilustracoes"
 
 # Rotulo humano de cada contexto, so para orientar o Claude na hora do prompt.
 _CONTEXTO_LABEL = {
@@ -44,20 +44,6 @@ _ESTILO = (
     "clean simple background, child-friendly, inclusive, high clarity, "
     "no text, no words, no letters, educational, calm"
 )
-
-
-def caminho_storage() -> Path:
-    STORAGE_DIR.mkdir(parents=True, exist_ok=True)
-    return STORAGE_DIR
-
-
-def salvar_bytes(ilustracao_id: int, image_bytes: bytes, ext: str = "png") -> str:
-    """Salva os bytes e devolve o NOME do arquivo (nao o caminho absoluto)."""
-    pasta = caminho_storage()
-    nome_arquivo = "%d.%s" % (int(ilustracao_id), ext)
-    with open(pasta / nome_arquivo, "wb") as f:
-        f.write(image_bytes)
-    return nome_arquivo
 
 
 @tm.feature(F.ILUSTRACAO_IA)
@@ -107,6 +93,34 @@ def gerar_ilustracao_ia(prompt: str, tamanho: str = "quadrado") -> bytes:
     """Gera a imagem pelo provedor configurado. Repassa as excecoes tipadas do
     image_providers (ProvedorImagemIndisponivel / ErroGeracaoImagem) para a rota
     decidir o status HTTP.
+
+    Ponto UNICO de geracao de imagem no repo (ver ai_materiais_service.py, que
+    chama esta mesma funcao para hq_tirinha/album_figurinhas) - por isso o
+    tracking de custo entra aqui, e nao em cada chamador. Mesmo principio do
+    tm.wrap() no client Anthropic: instrumentar o gargalo, nao cada uso.
+
+    feature=F.ILUSTRACAO_IA e explicito (nao herdado do contexto de quem
+    chamou) para casar com gerar_prompt_ilustracao() acima: as duas metades do
+    pipeline de ilustracao (prompt por Claude + imagem por IA) ficam sob a
+    mesma feature, mesmo quando disparadas de dentro de material_adaptado.
     """
     provedor = get_image_provider()
-    return provedor.gerar(prompt, tamanho=tamanho)
+    t0 = time.perf_counter()
+    try:
+        imagem = provedor.gerar(prompt, tamanho=tamanho)
+    except (ProvedorImagemIndisponivel, ErroGeracaoImagem) as exc:
+        tm.record(
+            model=provedor.model_id, provider=provedor.provider,
+            operation="image_generation", feature=F.ILUSTRACAO_IA,
+            tags={"tamanho": tamanho},
+            status="error", error_type=type(exc).__name__,
+            duration_ms=int((time.perf_counter() - t0) * 1000),
+        )
+        raise
+    tm.record(
+        model=provedor.model_id, provider=provedor.provider,
+        operation="image_generation", feature=F.ILUSTRACAO_IA,
+        tags={"tamanho": tamanho}, calls=1,
+        duration_ms=int((time.perf_counter() - t0) * 1000),
+    )
+    return imagem

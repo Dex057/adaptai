@@ -11,6 +11,7 @@ import json
 
 from app.database import get_db
 from app.api.dependencies import get_current_active_user, verificar_acesso_aluno
+from app.core.logging_config import get_logger
 from app.core.rate_limit import check_rate_limit
 from app.core.pagination import PaginationParams, build_page
 from app.models.user import User
@@ -18,6 +19,7 @@ from app.models.student import Student
 from app.models.material_adaptado_gerado import MaterialAdaptadoGerado
 from app.services.ai_materiais_service import MaterialAdaptadoService
 
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/materiais-adaptados", tags=["Materiais Adaptados"])
 
@@ -299,6 +301,19 @@ async def gerar_materiais_adaptados(
     response["tipos_solicitados"] = request_body.tipos_material
 
     # Salvar no banco
+    #
+    # 2026-08-17 — NAO ENGOLIR FALHA DE SAVE EM SILENCIO
+    # ------------------------------------------------------------------
+    # Antes, uma excecao aqui virava so um print() e a rota devolvia 200
+    # com o material inteiro no corpo mesmo sem persistir nada — o
+    # professor via "Material Gerado!" na hora (o front so olha o corpo
+    # da resposta, nunca confere material_id) e o material sumia na
+    # proxima visita ao historico. Suspeita forte: o proprio JSON com
+    # imagens embutidas em base64 (hq_tirinha/album_figurinhas, ate ~6,6MB
+    # — ver docs/dashcentral.md) estourando algum limite do MySQL no
+    # commit. Sem logar a excecao de verdade, essa causa nunca ficava
+    # visivel — daqui pra frente fica no log, e o front recebe 500 real
+    # em vez de sucesso fingido.
     try:
         material_salvo = MaterialAdaptadoGerado(
             student_id=request_body.student_id,
@@ -314,12 +329,29 @@ async def gerar_materiais_adaptados(
         db.commit()
         db.refresh(material_salvo)
         response["material_id"] = material_salvo.id
-        print(f"[OK] Material salvo! ID: {material_salvo.id}")
+        return response
     except Exception as e:
-        print(f"[ERRO] Salvar material: {type(e).__name__}")
         db.rollback()
-    
-    return response
+        tamanho_kb = len(json.dumps(response, default=str)) // 1024
+        logger.exception(
+            "Falha ao salvar material adaptado (student_id=%s, tipos=%s, "
+            "resultado_json ~%d KB)",
+            request_body.student_id, response.get("materiais_gerados"), tamanho_kb,
+        )
+        # A IA ja rodou e ja custou credito - por isso o erro e explicito
+        # (nao um 200 mentiroso) mas nao descarta silenciosamente: quem
+        # olhar o log tem tamanho do payload e tipo da excecao pra
+        # diagnosticar (ex.: estouro de max_allowed_packet do MySQL).
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": (
+                    "O material foi gerado mas não foi possível salvá-lo. "
+                    "Tente novamente - se persistir, avise o suporte."
+                ),
+                "erro_tipo": type(e).__name__,
+            },
+        )
 
 
 @router.get("/tipos-disponiveis")

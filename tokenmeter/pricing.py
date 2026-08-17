@@ -23,6 +23,11 @@ class Rate:
     output_per_mtok: Decimal
     cache_write_per_mtok: Decimal | None
     cache_read_per_mtok: Decimal | None
+    # Preço por CHAMADA (não por token) — cobre operações que não tokenizam,
+    # como geração de imagem: o provedor cobra por unidade gerada, não por
+    # entrada/saída de texto. Somado ao custo de token (que fica 0 nesse caso),
+    # não exige um campo novo por operação — só um jeito diferente de tarifar.
+    per_call_usd: Decimal | None
     version: str
     specificity: int
 
@@ -64,6 +69,7 @@ class PriceBook:
                 _ts(e["effective_from"]), _ts(e.get("effective_to")),
                 Rate(_dec(e["input_per_mtok"]), _dec(e["output_per_mtok"]),
                      _dec(e.get("cache_write_per_mtok")), _dec(e.get("cache_read_per_mtok")),
+                     _dec(e.get("per_call_usd")),
                      self.version, int(e.get("specificity", 1))),
             ))
 
@@ -83,8 +89,15 @@ class PriceBook:
 
     def cost(self, provider: str, model: str, at: dt.datetime, *, input_tokens: int,
              output_tokens: int, cache_write_tokens: int = 0,
-             cache_read_tokens: int = 0) -> tuple[Decimal | None, str | None]:
-        """Retorna (custo, versão). Modelo desconhecido -> (None, None), NUNCA exceção."""
+             cache_read_tokens: int = 0, calls: int = 0) -> tuple[Decimal | None, str | None]:
+        """Retorna (custo, versão). Modelo desconhecido -> (None, None), NUNCA exceção.
+
+        `calls` é quantas unidades tarifadas por chamada este evento representa
+        (normalmente 0 para chat, 1 para uma imagem gerada). Só produz custo se
+        a tarifa resolvida tiver `per_call_usd` — sem isso, `calls` é ignorado
+        em silêncio, então chamadas de chat comuns não precisam se preocupar
+        com o parâmetro.
+        """
         rate = self.resolve(provider, model, at)
         if rate is None:
             log.warning(
@@ -96,7 +109,10 @@ class PriceBook:
                  + Decimal(output_tokens) * rate.output_per_mtok
                  + Decimal(cache_write_tokens) * (rate.cache_write_per_mtok or rate.input_per_mtok)
                  + Decimal(cache_read_tokens) * (rate.cache_read_per_mtok or rate.input_per_mtok))
-        return (total / MTOK).quantize(Decimal("0.0000000001")), rate.version
+        total = total / MTOK
+        if rate.per_call_usd is not None and calls:
+            total += Decimal(calls) * rate.per_call_usd
+        return total.quantize(Decimal("0.0000000001")), rate.version
 
     def age_days(self, today: dt.date | None = None) -> int | None:
         if not self.reviewed_at:

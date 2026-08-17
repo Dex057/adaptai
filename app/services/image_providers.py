@@ -35,6 +35,13 @@ class ImageProvider:
     """Interface minima. Um provedor sabe transformar prompt -> bytes PNG/JPEG."""
 
     nome: str = "base"
+    # Provedor de COBRANCA (ex.: "fal", a empresa que manda a fatura) e o
+    # identificador do modelo dentro dele (ex.: o slug do fal.ai). `nome` acima
+    # e o apelido interno do AdaptAI ("flux") - pode nao coincidir com quem
+    # cobra, entao ficam campos separados. Expostos na interface para quem
+    # instrumenta a chamada (tokenmeter) gravar sem precisar conhecer FluxProvider.
+    provider: str = "unknown"
+    model_id: str = "unknown"
 
     def disponivel(self) -> bool:
         raise NotImplementedError
@@ -62,6 +69,7 @@ class FluxProvider(ImageProvider):
     """
 
     nome = "flux"
+    provider = "fal"
 
     def __init__(self):
         self.api_key = (settings.FAL_API_KEY or "").strip()

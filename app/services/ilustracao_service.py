@@ -15,6 +15,7 @@ por uma instrucao de seguranca explicita. O provedor ainda roda o proprio filtro
 A imagem pertence ao CONTEUDO (ver model Ilustracao) - gerada uma vez, reusada
 por toda a turma.
 """
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -23,7 +24,9 @@ import tokenmeter as tm
 from app.core.anthropic_client import get_anthropic_client, get_fast_model
 from app.core.features import F
 from app.core.logging_config import get_logger
-from app.services.image_providers import get_image_provider
+from app.services.image_providers import (ErroGeracaoImagem,
+                                           ProvedorImagemIndisponivel,
+                                           get_image_provider)
 
 logger = get_logger(__name__)
 
@@ -107,6 +110,34 @@ def gerar_ilustracao_ia(prompt: str, tamanho: str = "quadrado") -> bytes:
     """Gera a imagem pelo provedor configurado. Repassa as excecoes tipadas do
     image_providers (ProvedorImagemIndisponivel / ErroGeracaoImagem) para a rota
     decidir o status HTTP.
+
+    Ponto UNICO de geracao de imagem no repo (ver ai_materiais_service.py, que
+    chama esta mesma funcao para hq_tirinha/album_figurinhas) - por isso o
+    tracking de custo entra aqui, e nao em cada chamador. Mesmo principio do
+    tm.wrap() no client Anthropic: instrumentar o gargalo, nao cada uso.
+
+    feature=F.ILUSTRACAO_IA e explicito (nao herdado do contexto de quem
+    chamou) para casar com gerar_prompt_ilustracao() acima: as duas metades do
+    pipeline de ilustracao (prompt por Claude + imagem por IA) ficam sob a
+    mesma feature, mesmo quando disparadas de dentro de material_adaptado.
     """
     provedor = get_image_provider()
-    return provedor.gerar(prompt, tamanho=tamanho)
+    t0 = time.perf_counter()
+    try:
+        imagem = provedor.gerar(prompt, tamanho=tamanho)
+    except (ProvedorImagemIndisponivel, ErroGeracaoImagem) as exc:
+        tm.record(
+            model=provedor.model_id, provider=provedor.provider,
+            operation="image_generation", feature=F.ILUSTRACAO_IA,
+            tags={"tamanho": tamanho},
+            status="error", error_type=type(exc).__name__,
+            duration_ms=int((time.perf_counter() - t0) * 1000),
+        )
+        raise
+    tm.record(
+        model=provedor.model_id, provider=provedor.provider,
+        operation="image_generation", feature=F.ILUSTRACAO_IA,
+        tags={"tamanho": tamanho}, calls=1,
+        duration_ms=int((time.perf_counter() - t0) * 1000),
+    )
+    return imagem

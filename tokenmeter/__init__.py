@@ -80,12 +80,18 @@ def _require() -> Store:
 
 def record(*, model: str, input_tokens: int = 0, output_tokens: int = 0,
            cache_write_tokens: int = 0, cache_read_tokens: int = 0,
-           provider: str = "anthropic", operation: str = "chat",
+           provider: str = "anthropic", operation: str = "chat", calls: int = 0,
            feature: str | None = None, tags: dict[str, Any] | None = None,
            status: str = "ok", error_type: str | None = None,
            duration_ms: int | None = None, provider_request_id: str | None = None,
            occurred_at=None) -> None:
-    """Escape hatch manual. Nunca levanta exceção — nem se você passar lixo."""
+    """Escape hatch manual. Nunca levanta exceção — nem se você passar lixo.
+
+    `calls`: unidades tarifadas por CHAMADA (não por token) que este evento
+    representa — ex.: `calls=1` para uma imagem gerada. Só tem efeito se o
+    preço resolvido em pricing.yaml tiver `per_call_usd`; para chamadas de
+    chat comuns (tarifadas por token) deixe o default 0.
+    """
     if not _cfg.enabled or _cfg.recorder is None:
         return
     try:
@@ -104,7 +110,7 @@ def record(*, model: str, input_tokens: int = 0, output_tokens: int = 0,
         cost, version = _cfg.prices.cost(
             provider, model, ev.occurred_at, input_tokens=ev.input_tokens,
             output_tokens=ev.output_tokens, cache_write_tokens=ev.cache_write_tokens,
-            cache_read_tokens=ev.cache_read_tokens)
+            cache_read_tokens=ev.cache_read_tokens, calls=calls)
         ev.cost_usd, ev.pricing_version, ev.priced = cost, version, int(cost is not None)
         _cfg.recorder.record(ev)
     except Exception:

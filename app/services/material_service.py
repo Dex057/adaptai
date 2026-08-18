@@ -22,6 +22,41 @@ MAX_EXERCICIOS_GEOMETRIA = 6
 _MAX_WORKERS_FIGURA = 3  # I/O-bound (rede); mesmo criterio de _ilustrar_itens
 
 
+# ----------------------------------------------------------------------------
+# 2026-08-18 — TRUNCAMENTO SILENCIOSO
+# ----------------------------------------------------------------------------
+# Os tres geradores abaixo pegavam `response.content[0].text` e devolviam
+# success=True sem olhar `stop_reason`. Quando a resposta batia no teto de
+# max_tokens (4000 para um prompt que pede HTML rico com CSS inline — acontecia
+# com frequencia em "Material Visual" e "Lista de Atividades"), o material era
+# gravado com o HTML CORTADO NO MEIO: o professor abria e via a pagina
+# terminando no meio de uma frase, ou com o layout quebrado por uma tag aberta.
+# Pior: ficava com status "disponivel", entao nada indicava problema.
+#
+# `ai_materiais_service._chamar_ia` ja fazia essa checagem desde 11/08 (para os
+# materiais adaptados); a Biblioteca tinha ficado de fora.
+_ERRO_TRUNCADO = (
+    "O conteúdo pedido é longo demais e a resposta da IA foi cortada. "
+    "Tente um tema mais específico ou divida em dois materiais."
+)
+
+
+def _extrair_texto(response) -> str:
+    """Texto da resposta, sem markdown. Levanta ValueError se veio truncada/vazia."""
+    if getattr(response, "stop_reason", None) == "max_tokens":
+        raise ValueError(_ERRO_TRUNCADO)
+
+    blocos = getattr(response, "content", None) or []
+    if not blocos:
+        raise ValueError("A IA devolveu uma resposta vazia. Tente novamente.")
+
+    texto = (getattr(blocos[0], "text", "") or "").strip()
+    if not texto:
+        raise ValueError("A IA devolveu uma resposta vazia. Tente novamente.")
+
+    return texto.replace("```html", "").replace("```json", "").replace("```", "").strip()
+
+
 class MaterialGeracaoService:
     """Service para gerar materiais educacionais com IA"""
     
@@ -124,14 +159,14 @@ NÃO inclua explicações, apenas o HTML puro e bem formatado."""
         try:
             response = self.client.messages.create(
                 model=self.model,
-                max_tokens=4000,
+                # 8192: o prompt pede HTML rico com CSS inline em varias secoes;
+                # com 4000 a resposta era cortada com frequencia (ver
+                # _extrair_texto).
+                max_tokens=8192,
                 messages=[{"role": "user", "content": prompt}]
             )
             
-            html_content = response.content[0].text.strip()
-            
-            # Remover markdown se houver
-            html_content = html_content.replace("```html", "").replace("```", "").strip()
+            html_content = _extrair_texto(response)
             
             return {
                 "success": True,
@@ -213,14 +248,11 @@ RETORNE APENAS O JSON, sem explicações ou markdown."""
         try:
             response = self.client.messages.create(
                 model=self.model,
-                max_tokens=3000,
+                max_tokens=4096,
                 messages=[{"role": "user", "content": prompt}]
             )
             
-            json_text = response.content[0].text.strip()
-            
-            # Remover markdown se houver
-            json_text = json_text.replace("```json", "").replace("```", "").strip()
+            json_text = _extrair_texto(response)
             
             # Parse JSON
             try:
@@ -304,11 +336,12 @@ FORMATO DE SAIDA:
         try:
             response = self.client.messages.create(
                 model=self.model,
-                max_tokens=4000,
+                # Mesmo motivo do material visual: "atividades" com gabarito
+                # comentado nao cabia em 4000 tokens.
+                max_tokens=8192,
                 messages=[{"role": "user", "content": prompt}]
             )
-            html_content = response.content[0].text.strip()
-            html_content = html_content.replace("```html", "").replace("```", "").strip()
+            html_content = _extrair_texto(response)
             return {
                 "success": True,
                 "html": html_content,

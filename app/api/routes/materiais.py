@@ -2,6 +2,7 @@
 Rotas para Materiais de Estudo - COM STORAGE E AGENDA
 """
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Query
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import OperationalError
 from typing import List
@@ -186,6 +187,12 @@ def gerar_material_background(material_id: int):
                 print(f"💾 HTML salvo em: storage/{arquivo_path}")
             else:
                 conteudo_erro = resultado.get("error")
+        
+        else:
+            # 2026-08-18: tipo novo no enum sem gerador aqui caia neste vazio e
+            # o material ficava em GERANDO para sempre - o professor via
+            # "Gerando..." indefinidamente, sem erro em lugar nenhum.
+            conteudo_erro = f"Tipo de material '{material_tipo}' nao tem gerador implementado."
         
         print(f"✨ Conteúdo gerado! Atualizando banco...")
         
@@ -389,40 +396,82 @@ async def listar_materiais(
     IMPORTANTE: Endpoint mudou para formato paginado. Frontend antigo que espera
     array puro precisa acessar response.items ao inves de response direto.
     """
-    query = db.query(Material).filter(Material.criado_por_id == current_user.id)
-
     # 2026-08-11: antes era `Material.tipo == tipo.upper()`, comparando com
     # "VISUAL" enquanto TipoMaterial usa valores minusculos ("visual"). O
     # SQLAlchemy tentava TipoMaterial("VISUAL") e levantava LookupError -> 500.
     # Na pratica, clicar nas abas "Visuais" / "Mapas Mentais" quebrava a
     # listagem. Tipando o parametro como o proprio Enum, o FastAPI valida e
     # converte antes de chegar aqui (e o Swagger ganha um dropdown).
+    filtros = [Material.criado_por_id == current_user.id]
     if tipo:
-        query = query.filter(Material.tipo == tipo)
-
+        filtros.append(Material.tipo == tipo)
     if materia:
-        query = query.filter(Material.materia == materia)
-    
-    query = query.order_by(Material.criado_em.desc())
-    
-    total = query.count()
-    materiais = query.offset(pagination.offset).limit(pagination.limit).all()
-    
-    # Serializar com total de alunos (eager-load relationship evita N+1)
-    items = []
-    for material in materiais:
-        items.append({
-            "id": material.id,
-            "titulo": material.titulo,
-            "descricao": material.descricao,
-            "tipo": material.tipo,
-            "materia": material.materia,
-            "serie_nivel": material.serie_nivel,
-            "status": material.status,
-            "criado_em": material.criado_em,
-            "total_alunos": len(material.materiais_alunos),
-        })
-    
+        filtros.append(Material.materia == materia)
+
+    # ------------------------------------------------------------------
+    # 2026-08-18 - SELECT ENXUTO + FIM DO N+1
+    # ------------------------------------------------------------------
+    # Duas coisas pesavam nesta rota, e a migration 012 agravou a primeira:
+    #
+    # 1. `db.query(Material)` traz TODAS as colunas - agora incluindo
+    #    `conteudo_gerado` (LONGTEXT com o material inteiro). Com ORDER BY em
+    #    cima disso, o MySQL faz filesort carregando linhas enormes e responde
+    #    "1038 Out of sort memory" - exatamente o erro que derrubou o historico
+    #    de materiais adaptados. Aqui seriam 100 materiais completos por
+    #    pagina, para exibir uma lista de cards. (`conteudo_gerado` tambem e
+    #    deferred no model; o SELECT explicito abaixo deixa a intencao obvia.)
+    #
+    # 2. `len(material.materiais_alunos)` disparava um SELECT por material
+    #    (o comentario antigo prometia eager-load, mas nao havia nenhum).
+    #    Com size=100, 100 queries extras por abertura de tela.
+    #
+    # Agora: um COUNT, uma pagina (so as colunas da lista) e uma contagem
+    # agrupada. Tres queries, independente do tamanho da biblioteca.
+    total = db.query(func.count(Material.id)).filter(*filtros).scalar() or 0
+
+    materiais = (
+        db.query(
+            Material.id,
+            Material.titulo,
+            Material.descricao,
+            Material.tipo,
+            Material.materia,
+            Material.serie_nivel,
+            Material.status,
+            Material.criado_em,
+        )
+        .filter(*filtros)
+        .order_by(Material.criado_em.desc(), Material.id.desc())
+        .offset(pagination.offset)
+        .limit(pagination.limit)
+        .all()
+    )
+
+    ids = [m.id for m in materiais]
+    alunos_por_material = {}
+    if ids:
+        alunos_por_material = dict(
+            db.query(MaterialAluno.material_id, func.count(MaterialAluno.id))
+            .filter(MaterialAluno.material_id.in_(ids))
+            .group_by(MaterialAluno.material_id)
+            .all()
+        )
+
+    items = [
+        {
+            "id": m.id,
+            "titulo": m.titulo,
+            "descricao": m.descricao,
+            "tipo": m.tipo,
+            "materia": m.materia,
+            "serie_nivel": m.serie_nivel,
+            "status": m.status,
+            "criado_em": m.criado_em,
+            "total_alunos": alunos_por_material.get(m.id, 0),
+        }
+        for m in materiais
+    ]
+
     return build_page(items=items, total=total, pagination=pagination)
 
 

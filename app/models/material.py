@@ -1,9 +1,9 @@
 """
 Modelos para Materiais de Estudo
 """
-from sqlalchemy import Column, Integer, String, Text, DateTime, JSON, ForeignKey, Enum as SQLEnum
+from sqlalchemy import Column, Integer, String, Text, DateTime, JSON, ForeignKey, Index, Enum as SQLEnum
 from sqlalchemy.dialects.mysql import LONGTEXT
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import relationship, deferred
 from sqlalchemy.sql import func
 from enum import Enum
 from app.database import Base
@@ -34,7 +34,13 @@ class StatusMaterial(str, Enum):
 class Material(Base):
     """Material de estudo gerado por IA"""
     __tablename__ = "materiais"
-    __table_args__ = {'schema': None}
+    # 2026-08-18: indice composto para GET /materiais/ (WHERE criado_por_id
+    # ORDER BY criado_em DESC). Sem ele o MySQL varre a tabela e ordena em
+    # filesort - ver migrations/013_indices_listagem_materiais.sql.
+    __table_args__ = (
+        Index("ix_materiais_criado_por_criado_em", "criado_por_id", "criado_em"),
+        {'schema': None},
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     titulo = Column(String(200), nullable=False, index=True)
@@ -64,7 +70,16 @@ class Material(Base):
     # (TEXT, de 64KB, ficaria apertado). Variante Text no SQLite para os testes
     # (mesmo motivo do MEDIUMBLOB de Ilustracao: tipo MySQL-only quebra o
     # create_all() da suite).
-    conteudo_gerado = Column(LONGTEXT().with_variant(Text, "sqlite"), nullable=True)
+    #
+    # 2026-08-18 — `deferred`: a coluna NAO entra em `SELECT materiais.*`.
+    # Nao e so trafego. Com uma coluna grande no SELECT, o ORDER BY da listagem
+    # vira um filesort de linhas enormes e o MySQL responde
+    # "1038 Out of sort memory" — foi assim que o historico de materiais
+    # adaptados caiu em producao (mesmo padrao, com resultado_json). Aqui o
+    # risco e maior ainda: LONGTEXT com um material inteiro por linha, 100
+    # linhas por pagina. So carrega quando alguem le `material.conteudo_gerado`
+    # de fato, que e a rota de conteudo — uma linha por vez.
+    conteudo_gerado = deferred(Column(LONGTEXT().with_variant(Text, "sqlite"), nullable=True))
 
     # Legado: nome do arquivo no storage. Continua sendo escrito (o disco local
     # em dev/producao-com-volume ainda serve como cache), mas a LEITURA so cai

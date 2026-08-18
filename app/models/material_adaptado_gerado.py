@@ -1,8 +1,8 @@
 """
 Model para Materiais Adaptados Gerados
 """
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, JSON
-from sqlalchemy.orm import relationship
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Index, JSON
+from sqlalchemy.orm import relationship, deferred
 from datetime import datetime, timezone
 from app.database import Base
 
@@ -13,6 +13,12 @@ class MaterialAdaptadoGerado(Base):
     Salva o resultado completo em JSON
     """
     __tablename__ = "materiais_adaptados_gerados"
+    # Indice composto para o historico (WHERE student_id ORDER BY created_at
+    # DESC) - ver migrations/012_materiais_conteudo_no_banco.sql.
+    __table_args__ = (
+        Index("ix_mag_student_created", "student_id", "created_at"),
+    )
+
     
     id = Column(Integer, primary_key=True, index=True)
     student_id = Column(Integer, ForeignKey("students.id"), nullable=False)
@@ -24,7 +30,27 @@ class MaterialAdaptadoGerado(Base):
     tipos_material = Column(JSON, nullable=False)  # Lista de tipos gerados
     
     # Resultado completo em JSON
-    resultado_json = Column(JSON, nullable=False)
+    #
+    # 2026-08-18 - `deferred`: esta coluna NAO entra mais em
+    # `SELECT materiais_adaptados_gerados.*`.
+    #
+    # Causa raiz de "Nao foi possivel carregar os materiais" e do 500 em
+    # GET /materiais-adaptados/historico/student/{id}:
+    #
+    #   pymysql.err.OperationalError: (1038, 'Out of sort memory, consider
+    #   increasing server sort buffer size')
+    #
+    # A listagem fazia `db.query(MaterialAdaptadoGerado)` (todas as colunas)
+    # com ORDER BY created_at DESC LIMIT 100. Desde que hq_tirinha e
+    # album_figurinhas passaram a embutir imagens em base64 aqui dentro
+    # (ate ~6,6MB por linha - ver ai_materiais_service._ilustrar_itens), o
+    # filesort do MySQL passou a ter que carregar megabytes por linha no sort
+    # buffer e estourava. Ou seja: o historico quebrava por causa do TAMANHO
+    # de um campo que a listagem nem usa.
+    #
+    # Com deferred, o JSON so e buscado quando alguem le
+    # `material.resultado_json` (rotas de detalhe, uma linha por vez).
+    resultado_json = deferred(Column(JSON, nullable=False))
     
     # Informações de geração
     tempo_geracao = Column(Integer, nullable=True)  # Em segundos

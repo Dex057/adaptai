@@ -2,7 +2,7 @@
 Rotas de Materiais para Estudantes - COM STORAGE
 """
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.sql import func
 from typing import List
 
@@ -32,7 +32,13 @@ async def listar_meus_materiais(
     Lista todos os materiais disponíveis para o aluno
     """
     # Buscar materiais do aluno com status DISPONIVEL
-    materiais_aluno = db.query(MaterialAluno).join(Material).filter(
+    # joinedload: a resposta embute o material (MaterialAlunoResponse.material)
+    # e, sem isto, cada linha disparava um SELECT extra para carregar o
+    # relacionamento (N+1). `Material.conteudo_gerado` fica de fora - e
+    # deferred, e a listagem nao precisa do conteudo.
+    materiais_aluno = db.query(MaterialAluno).join(Material).options(
+        joinedload(MaterialAluno.material)
+    ).filter(
         MaterialAluno.aluno_id == current_student.id,
         Material.status == StatusMaterial.DISPONIVEL
     ).all()

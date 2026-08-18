@@ -8,12 +8,12 @@ from typing import List
 
 from app.database import get_db
 from app.models.student import Student
-from app.models.material import Material, MaterialAluno, StatusMaterial, TipoMaterial
+from app.models.material import Material, MaterialAluno, StatusMaterial
 from app.schemas.material import (
     MaterialAlunoResponse, VisualizarMaterialRequest,
     AnotacaoRequest, FavoritoRequest
 )
-from app.services.storage_service import storage_service
+from app.services.material_conteudo import ler_conteudo
 from app.api.dependencies import get_current_student
 
 router = APIRouter(prefix="/student/materiais", tags=["Student - Materiais"])
@@ -75,20 +75,16 @@ async def visualizar_material(
     # None (commitando inflacao do contador + resposta vazia pro aluno).
     material = material_aluno.material
     
-    if material.tipo == TipoMaterial.VISUAL:
-        conteudo = storage_service.ler_html(material.id)
-        conteudo_tipo = "html"
-    elif material.tipo == TipoMaterial.MAPA_MENTAL:
-        conteudo = storage_service.ler_json(material.id)
-        conteudo_tipo = "json"
-    else:
-        # Tipo nao suportado no portal do aluno ainda (ex: flashcards,
-        # infografico - esses vivem em MaterialAdaptadoGerado, nao aqui).
-        raise HTTPException(
-            status_code=status.HTTP_501_NOT_IMPLEMENTED,
-            detail=f"Tipo de material '{material.tipo}' nao suportado nesta rota."
-        )
-    
+    # 2026-08-17: a leitura passou a ser a MESMA da rota do professor
+    # (services/material_conteudo.ler_conteudo): banco primeiro, storage como
+    # fallback. Antes esta rota so aceitava VISUAL e MAPA_MENTAL e devolvia 501
+    # para os outros quatro tipos da Biblioteca (resumo, texto_simplificado,
+    # roteiro_estudo, atividades) — o professor atribuia o material e o aluno
+    # batia num erro que nao dizia nada a ele. Com o helper compartilhado, todo
+    # tipo que o professor consegue gerar, o aluno consegue abrir (incluindo o
+    # novo 'geometria').
+    conteudo_tipo, conteudo = ler_conteudo(material)
+
     if not conteudo:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

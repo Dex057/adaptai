@@ -1,179 +1,68 @@
 -- ============================================================================
---  012 - Biblioteca de Materiais: conteudo no banco, colunas de versao e
---        indices de listagem.
+--  012 — materiais.conteudo_gerado + tipo 'geometria'
 --
---  TRES problemas, todos com sintoma na mesma tela ("Materiais").
+--  PARTE 1 (bug): o conteudo do material da Biblioteca era gravado SO em
+--  storage/materiais/{id}.html|json, com o banco guardando apenas o nome do
+--  arquivo (arquivo_path). O servico web do Railway roda em disco EFEMERO —
+--  nao ha volume montado (ver railway.json). A cada redeploy o arquivo some
+--  enquanto a linha continua com status='disponivel', e
+--  GET /materiais/{id}/conteudo passa a devolver 404 para material que a
+--  Biblioteca mostra como pronto.
 --
---  ---------------------------------------------------------------------------
---  (1) materiais.conteudo / materiais.conteudo_versoes - DISCO EFEMERO
---  ---------------------------------------------------------------------------
---  O HTML (ou o JSON do mapa mental) gerado pela IA era gravado so em
---  backend/storage/materiais/{id}.html e a linha guardava apenas o nome do
---  arquivo (arquivo_path). O servico web do Railway roda em disco EFEMERO,
---  sem volume: a cada redeploy o arquivo some e a linha continua com
---  status='disponivel'. Para o professor, o material "nao persistiu" - abre e
---  responde 404 "Conteudo do material nao encontrado no storage".
+--  E o MESMO defeito que a migration 011 corrigiu para `ilustracoes`
+--  (imagem_bytes) em 2026-08-17; a correcao nunca tinha chegado em `materiais`.
 --
---  Mesma causa raiz da migration 011 (ilustracoes.imagem_bytes), mesma
---  correcao: o conteudo passa a morar NA LINHA.
+--  Correcao: o conteudo passa a morar na propria linha, em conteudo_gerado
+--  (LONGTEXT). arquivo_path FICA (expand/migrate/contract, ver
+--  docs/ARQUITETURA-CONTEUDOS.md secao 4) e continua sendo escrito como cache
+--  local; a leitura so cai nele quando conteudo_gerado esta vazio, que e o
+--  caso das linhas antigas.
 --
---    conteudo          MEDIUMTEXT  conteudo da versao atual (ate 16MB; um
---                                  material tipico tem 20-60KB)
---    conteudo_versoes  JSON        {"1": "<html...>", "2": "..."} das versoes
---                                  arquivadas por POST /materiais/{id}/regenerar
+--  LONGTEXT e nao TEXT: a atividade de geometria (parte 2) carrega um SVG
+--  inline por exercicio; os 64KB de TEXT ficariam apertados.
 --
---  arquivo_path FICA (expand/migrate/contract). Codigo novo continua
---  preenchendo o campo como marcador logico, mas ninguem le arquivo por ele:
---  a leitura passa por app/services/material_conteudo.ler(), que tenta o banco
---  e cai para o disco so por causa de linhas antigas.
+--  PARTE 2 (feature): novo tipo 'geometria' no ENUM materiais.tipo —
+--  atividade de matematica com as figuras desenhadas pela IA em SVG
+--  (app/services/material_service.gerar_atividade_geometria).
 --
---  Linhas antigas com arquivo_path preenchido e conteudo NULL apontam para um
---  arquivo que ja nao existe - irrecuperaveis. O professor pode regerar pelo
---  botao "Regenerar" (nao consome cota de plano).
+--  ATENCAO A ORDEM: rodar esta migration ANTES do deploy do codigo novo. Sem
+--  a coluna, todo INSERT/UPDATE de material quebra; sem o valor no ENUM, a
+--  criacao de material de geometria falha com "Data truncated for column
+--  'tipo'".
 --
---  ---------------------------------------------------------------------------
---  (2) materiais.versao / materiais.historico_versoes - COLUNAS SEM MIGRATION
---  ---------------------------------------------------------------------------
---  O versionamento de material entrou no codigo em 08/06/2026 (commit
---  71b18c6) com um script Python avulso (aplicar_migracao_materiais_versao.py)
---  que depois saiu do repositorio - nao ha registro de ter rodado em
---  producao. Se essas colunas NAO existem no MySQL, todo
---  "SELECT materiais.*" falha com
---
---      (1054, "Unknown column 'materiais.versao' in 'field list'")
---
---  e a Biblioteca abre direto em "Nao foi possivel carregar os materiais".
---  Os ADDs abaixo sao condicionais: se as colunas ja existirem, nada acontece.
---
---  ---------------------------------------------------------------------------
---  (3) Indices - "1038 Out of sort memory"
---  ---------------------------------------------------------------------------
---  GET /materiais-adaptados/historico/student/{id} caiu em producao com:
---
---    pymysql.err.OperationalError: (1038, 'Out of sort memory, consider
---    increasing server sort buffer size')
---
---  O SELECT trazia materiais_adaptados_gerados.* (inclusive resultado_json,
---  que com hq_tirinha/album_figurinhas chega a megabytes por causa das imagens
---  em base64) e ordenava por created_at sem indice: filesort de linhas
---  enormes. O codigo ja foi corrigido para nao selecionar o JSON; os indices
---  abaixo eliminam tambem o filesort, que e o que sobra do problema quando o
---  volume por aluno cresce.
---
---  ---------------------------------------------------------------------------
---  COMO RODAR
---  ---------------------------------------------------------------------------
---  Cole o arquivo inteiro no console MySQL do Railway. E IDEMPOTENTE: cada
---  passo checa o INFORMATION_SCHEMA antes de executar, entao rodar duas vezes
---  nao da erro (a segunda vez so imprime "ja existe"). Rodar ANTES do deploy
---  do codigo novo (padrao expand: schema pronto antes de alguem escrever nele).
---
---  Risco: baixo. Só ADD COLUMN nullable e CREATE INDEX; nenhum SELECT/INSERT
---  existente muda de forma.
+--  Risco de aplicar: baixo. ADD COLUMN nullable + MODIFY de ENUM apenas
+--  ACRESCENTANDO um valor (nenhum valor existente e removido ou renomeado,
+--  entao nenhuma linha gravada muda de significado).
 --
 --  Desfazer:
---    ALTER TABLE materiais DROP COLUMN conteudo, DROP COLUMN conteudo_versoes;
---    DROP INDEX ix_materiais_criado_por_criado_em ON materiais;
---    DROP INDEX ix_mag_student_created ON materiais_adaptados_gerados;
---  (versao/historico_versoes NAO devem ser removidas - o codigo usa.)
+--    ALTER TABLE materiais DROP COLUMN conteudo_gerado;
+--    ALTER TABLE materiais MODIFY COLUMN tipo
+--      ENUM('VISUAL','MAPA_MENTAL','RESUMO','TEXTO_SIMPLIFICADO',
+--           'ROTEIRO_ESTUDO','ATIVIDADES') NOT NULL;
 -- ============================================================================
 
--- ---------------------------------------------------------------------------
--- (1) conteudo
--- ---------------------------------------------------------------------------
-SET @existe := (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
-                 WHERE TABLE_SCHEMA = DATABASE()
-                   AND TABLE_NAME = 'materiais'
-                   AND COLUMN_NAME = 'conteudo');
-SET @sql := IF(@existe = 0,
-  'ALTER TABLE materiais ADD COLUMN conteudo MEDIUMTEXT NULL AFTER arquivo_path',
-  'SELECT "materiais.conteudo ja existe - nada a fazer" AS resultado');
-PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+ALTER TABLE materiais
+  ADD COLUMN conteudo_gerado LONGTEXT NULL AFTER arquivo_path;
 
--- ---------------------------------------------------------------------------
--- (1) conteudo_versoes
--- ---------------------------------------------------------------------------
-SET @existe := (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
-                 WHERE TABLE_SCHEMA = DATABASE()
-                   AND TABLE_NAME = 'materiais'
-                   AND COLUMN_NAME = 'conteudo_versoes');
-SET @sql := IF(@existe = 0,
-  'ALTER TABLE materiais ADD COLUMN conteudo_versoes JSON NULL AFTER conteudo',
-  'SELECT "materiais.conteudo_versoes ja existe - nada a fazer" AS resultado');
-PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+-- ATENCAO AO CASE. O SQLAlchemy declara `SQLEnum(TipoMaterial)` usando os NOMES
+-- dos membros do Enum Python (VISUAL, MAPA_MENTAL, ...), nao os valores
+-- minusculos — por isso o ENUM do MySQL deve estar em maiusculas. Errar o case
+-- aqui NAO da erro: reescreve o ENUM com valores diferentes dos gravados e as
+-- linhas existentes viram string vazia.
+--
+-- PREFIRA `python scripts/aplicar_migration_012.py --aplicar`: ele le o ENUM
+-- real em INFORMATION_SCHEMA e so ACRESCENTA o valor novo, preservando ordem e
+-- case do que ja existe (e e idempotente). Use o SQL abaixo apenas se ja tiver
+-- confirmado o case com a consulta de conferencia no fim do arquivo.
+ALTER TABLE materiais
+  MODIFY COLUMN tipo ENUM(
+    'VISUAL','MAPA_MENTAL','RESUMO','TEXTO_SIMPLIFICADO',
+    'ROTEIRO_ESTUDO','ATIVIDADES','GEOMETRIA'
+  ) NOT NULL;
 
--- ---------------------------------------------------------------------------
--- (2) versao
--- ---------------------------------------------------------------------------
-SET @existe := (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
-                 WHERE TABLE_SCHEMA = DATABASE()
-                   AND TABLE_NAME = 'materiais'
-                   AND COLUMN_NAME = 'versao');
-SET @sql := IF(@existe = 0,
-  'ALTER TABLE materiais ADD COLUMN versao INT NULL DEFAULT 1',
-  'SELECT "materiais.versao ja existe - nada a fazer" AS resultado');
-PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
-
--- ---------------------------------------------------------------------------
--- (2) historico_versoes
--- ---------------------------------------------------------------------------
-SET @existe := (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
-                 WHERE TABLE_SCHEMA = DATABASE()
-                   AND TABLE_NAME = 'materiais'
-                   AND COLUMN_NAME = 'historico_versoes');
-SET @sql := IF(@existe = 0,
-  'ALTER TABLE materiais ADD COLUMN historico_versoes JSON NULL',
-  'SELECT "materiais.historico_versoes ja existe - nada a fazer" AS resultado');
-PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
-
--- ---------------------------------------------------------------------------
--- (3) indice da listagem da Biblioteca
--- ---------------------------------------------------------------------------
-SET @existe := (SELECT COUNT(*) FROM INFORMATION_SCHEMA.STATISTICS
-                 WHERE TABLE_SCHEMA = DATABASE()
-                   AND TABLE_NAME = 'materiais'
-                   AND INDEX_NAME = 'ix_materiais_criado_por_criado_em');
-SET @sql := IF(@existe = 0,
-  'CREATE INDEX ix_materiais_criado_por_criado_em ON materiais (criado_por_id, criado_em)',
-  'SELECT "ix_materiais_criado_por_criado_em ja existe - nada a fazer" AS resultado');
-PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
-
--- ---------------------------------------------------------------------------
--- (3) indice do historico de materiais adaptados
--- ---------------------------------------------------------------------------
-SET @existe := (SELECT COUNT(*) FROM INFORMATION_SCHEMA.STATISTICS
-                 WHERE TABLE_SCHEMA = DATABASE()
-                   AND TABLE_NAME = 'materiais_adaptados_gerados'
-                   AND INDEX_NAME = 'ix_mag_student_created');
-SET @sql := IF(@existe = 0,
-  'CREATE INDEX ix_mag_student_created ON materiais_adaptados_gerados (student_id, created_at)',
-  'SELECT "ix_mag_student_created ja existe - nada a fazer" AS resultado');
-PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
-
--- ============================================================================
--- CONFERENCIA
--- ============================================================================
-
--- esperado: arquivo_path, conteudo (mediumtext), conteudo_versoes (json),
---           versao (int), historico_versoes (json)
+-- conferencia — esperado: conteudo_gerado longtext YES, e 'GEOMETRIA' dentro
+-- do COLUMN_TYPE de `tipo`.
 SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE
   FROM INFORMATION_SCHEMA.COLUMNS
- WHERE TABLE_SCHEMA = DATABASE()
-   AND TABLE_NAME = 'materiais'
-   AND COLUMN_NAME IN ('arquivo_path', 'conteudo', 'conteudo_versoes',
-                       'versao', 'historico_versoes')
- ORDER BY ORDINAL_POSITION;
-
--- esperado: os dois indices, com as duas colunas cada
-SELECT TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX, COLUMN_NAME
-  FROM INFORMATION_SCHEMA.STATISTICS
- WHERE TABLE_SCHEMA = DATABASE()
-   AND INDEX_NAME IN ('ix_materiais_criado_por_criado_em', 'ix_mag_student_created')
- ORDER BY TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX;
-
--- quantos materiais ficaram sem conteudo recuperavel (o arquivo em disco ja
--- nao existe): sao os que o professor precisa regerar
-SELECT COUNT(*) AS materiais_sem_conteudo
-  FROM materiais
- WHERE conteudo IS NULL
-   AND status = 'DISPONIVEL';
+ WHERE TABLE_NAME = 'materiais'
+   AND COLUMN_NAME IN ('conteudo_gerado', 'tipo');

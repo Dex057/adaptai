@@ -8,12 +8,12 @@ from typing import List
 
 from app.database import get_db
 from app.models.student import Student
-from app.models.material import Material, MaterialAluno, StatusMaterial, TipoMaterial
+from app.models.material import Material, MaterialAluno, StatusMaterial
 from app.schemas.material import (
     MaterialAlunoResponse, VisualizarMaterialRequest,
     AnotacaoRequest, FavoritoRequest
 )
-from app.services import material_conteudo
+from app.services.material_conteudo import ler_conteudo
 from app.api.dependencies import get_current_student
 
 router = APIRouter(prefix="/student/materiais", tags=["Student - Materiais"])
@@ -32,9 +32,10 @@ async def listar_meus_materiais(
     Lista todos os materiais disponíveis para o aluno
     """
     # Buscar materiais do aluno com status DISPONIVEL
-    # joinedload: a resposta embute o material (MaterialAlunoResponse.material),
-    # e sem isso cada linha disparava um SELECT extra para carregar o
-    # relacionamento (N+1). `Material.conteudo` fica de fora - e deferred.
+    # joinedload: a resposta embute o material (MaterialAlunoResponse.material)
+    # e, sem isto, cada linha disparava um SELECT extra para carregar o
+    # relacionamento (N+1). `Material.conteudo_gerado` fica de fora - e
+    # deferred, e a listagem nao precisa do conteudo.
     materiais_aluno = db.query(MaterialAluno).join(Material).options(
         joinedload(MaterialAluno.material)
     ).filter(
@@ -80,19 +81,16 @@ async def visualizar_material(
     # None (commitando inflacao do contador + resposta vazia pro aluno).
     material = material_aluno.material
     
-    # 2026-08-18: so VISUAL e MAPA_MENTAL eram atendidos aqui; resumo,
-    # texto_simplificado, roteiro_estudo e atividades - que o professor gera na
-    # mesma Biblioteca e atribui ao aluno - respondiam 501. Todos os tipos de
-    # `materiais` sao HTML, menos o mapa mental (JSON): e essa a unica
-    # distincao que faz sentido. Os tipos que "nao existem aqui" (flashcards,
-    # infografico...) vivem em MaterialAdaptadoGerado e nem chegam nesta rota.
-    #
-    # A leitura tambem passou a vir do banco (com o disco como fallback
-    # legado) - antes lia so do storage efemero do Railway, que perde os
-    # arquivos a cada redeploy.
-    conteudo = material_conteudo.ler(material)
-    conteudo_tipo = "json" if material_conteudo.e_mapa_mental(material) else "html"
-    
+    # 2026-08-17: a leitura passou a ser a MESMA da rota do professor
+    # (services/material_conteudo.ler_conteudo): banco primeiro, storage como
+    # fallback. Antes esta rota so aceitava VISUAL e MAPA_MENTAL e devolvia 501
+    # para os outros quatro tipos da Biblioteca (resumo, texto_simplificado,
+    # roteiro_estudo, atividades) — o professor atribuia o material e o aluno
+    # batia num erro que nao dizia nada a ele. Com o helper compartilhado, todo
+    # tipo que o professor consegue gerar, o aluno consegue abrir (incluindo o
+    # novo 'geometria').
+    conteudo_tipo, conteudo = ler_conteudo(material)
+
     if not conteudo:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

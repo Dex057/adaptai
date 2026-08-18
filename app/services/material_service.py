@@ -3,11 +3,23 @@ Service para geração de materiais com IA
 """
 from app.core.anthropic_client import get_anthropic_client, get_default_model
 import json
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Dict, List
 from app.core.config import settings
+from app.core.logging_config import get_logger
+from app.services.svg_sanitizer import sanitizar_svg
 
 # tokenmeter: atribuicao de consumo de IA (ver app/core/features.py)
 import tokenmeter as tm
 from app.core.features import F
+
+logger = get_logger(__name__)
+
+# Tetos da atividade de geometria (custo + tempo): cada figura e UMA chamada
+# extra a IA. 6 exercicios ja e uma lista de casa cheia; acima disso o material
+# fica longo pro aluno e caro pra escola.
+MAX_EXERCICIOS_GEOMETRIA = 6
+_MAX_WORKERS_FIGURA = 3  # I/O-bound (rede); mesmo criterio de _ilustrar_itens
 
 
 # ----------------------------------------------------------------------------
@@ -340,6 +352,204 @@ FORMATO DE SAIDA:
                 "success": False,
                 "error": str(e)
             }
+
+    # ==========================================================================
+    # ATIVIDADE DE GEOMETRIA — 2026-08-17
+    # ==========================================================================
+    # POR QUE A FIGURA E SVG FEITO PELO CLAUDE, E NAO IMAGEM DO FLUX/fal.ai
+    #
+    # O repo ja gera imagem por difusao (image_providers -> Flux). Para uma
+    # cena ilustrativa ("uma crianca regando uma planta") isso e otimo. Para
+    # geometria e a ferramenta errada: modelo de difusao nao respeita medida.
+    # Pedir "triangulo retangulo com catetos 3 e 4" devolve um triangulo
+    # plausivel, com angulos errados e rotulos ilegiveis — e o exercicio inteiro
+    # passa a ensinar coisa errada. Alem disso o modelo de imagem escreve texto
+    # mal (por isso o _ESTILO de ilustracao_service proibe texto), e figura
+    # geometrica sem rotulo ("A", "B", "5 cm", "60°") nao serve.
+    #
+    # SVG escrito pelo Claude resolve os tres pontos: coordenada e exata, o
+    # rotulo e texto de verdade (selecionavel, legivel por leitor de tela,
+    # nitido na impressao) e o arquivo tem alguns KB em vez de ~400KB por
+    # imagem em base64 — o que importa muito aqui, porque foi exatamente o
+    # peso do base64 que derrubou o salvamento de hq_tirinha/album_figurinhas
+    # (ver o comentario de 2026-08-17 em routes/materiais_adaptados.py).
+    #
+    # SEGURANCA (duas camadas): o SVG passa por svg_sanitizer.sanitizar_svg()
+    # ANTES de ser gravado — allowlist de tags e atributos, sem
+    # script/style/foreignObject/href/on*. Ver o docstring de la. No frontend,
+    # GeometriaViewer.jsx ainda o renderiza dentro de um <img src="data:...">,
+    # onde o navegador nao executa script nem que o sanitizador falhasse.
+    #
+    # DUAS FASES (uma chamada de estrutura + uma chamada POR FIGURA):
+    # pedir tudo numa tacada so faz o modelo economizar atencao no SVG (que e
+    # a parte dificil) e ainda arrisca truncar no limite de tokens. Cada figura
+    # isolada tambem falha isolada: sem a figura, o exercicio ainda vale, e o
+    # viewer mostra a descricao textual no lugar.
+    # ==========================================================================
+
+    @tm.feature(F.MATERIAL_ADAPTADO)
+    def _gerar_figura_svg(self, exercicio: Dict[str, Any], serie: str) -> None:
+        """Gera o SVG de UM exercicio e o grava em `exercicio['figura_svg']`.
+
+        Muta o dict in-place (mesmo padrao de ai_materiais_service._ilustrar_itens).
+        Falha aqui nao derruba o material: o exercicio simplesmente fica sem
+        figura e o viewer exibe `figura_descricao`.
+        """
+        descricao = (exercicio.get("figura_descricao") or "").strip()
+        if not descricao:
+            return
+
+        prompt = f"""Desenhe em SVG a figura geometrica descrita abaixo, para uma atividade escolar de {serie}.
+
+FIGURA A DESENHAR:
+{descricao}
+
+REGRAS OBRIGATORIAS:
+1. Responda APENAS com o codigo SVG. Sem markdown, sem crases, sem explicacao.
+2. Comece com <svg viewBox="0 0 400 300" xmlns="http://www.w3.org/2000/svg"> e ajuste o viewBox se a figura pedir outra proporcao. NAO use os atributos width/height.
+3. PRECISAO IMPORTA: calcule as coordenadas de verdade. Se o enunciado diz que dois lados sao iguais, eles PRECISAM ter o mesmo comprimento no desenho; se diz 90°, o angulo tem que ser reto. O aluno vai medir com regua e transferidor.
+4. Rotule com <text>: vertices (A, B, C), medidas ("5 cm") e angulos ("60°") que o enunciado citar. Fonte legivel (font-size 14 a 18), posicionada FORA da figura para nao cobrir os tracos.
+5. Estilo: fundo transparente, tracos escuros (stroke="#1f2937") com stroke-width entre 2 e 3, preenchimento suave (fill="#dbeafe" com fill-opacity="0.6") ou fill="none". Marque o angulo reto com o quadradinho tradicional quando houver.
+6. Deixe margem de pelo menos 30 unidades entre a figura e a borda do viewBox, para os rotulos caberem.
+7. NAO use <script>, <style>, <foreignObject>, <image>, <use> nem atributos href/on*. Somente formas, linhas, textos e transform."""
+
+        try:
+            response = self.client.messages.create(
+                model=self.model,
+                max_tokens=2000,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            bruto = response.content[0].text if response.content else ""
+            limpo = sanitizar_svg(bruto)
+            if limpo:
+                exercicio["figura_svg"] = limpo
+            else:
+                logger.warning(
+                    "Figura de geometria descartada na sanitizacao ('%s...')",
+                    descricao[:60],
+                )
+        except Exception:
+            logger.exception("Falha ao gerar figura de geometria ('%s...')", descricao[:60])
+
+    @tm.feature(F.MATERIAL_ADAPTADO)
+    def gerar_atividade_geometria(
+        self,
+        titulo: str,
+        conteudo: str,
+        serie: str,
+        adaptacoes: list = None,
+    ) -> dict:
+        """Gera uma atividade de geometria: exercicios + figuras em SVG.
+
+        Returns:
+            dict com 'success' e 'json' (ou 'error'). O 'json' e o conteudo
+            estruturado que o frontend renderiza em GeometriaViewer.jsx.
+        """
+        adaptacoes_text = ""
+        if adaptacoes:
+            adaptacoes_text = (
+                f"\n\nADAPTACOES: a turma inclui alunos com {', '.join(adaptacoes)}. "
+                "Use enunciados curtos e diretos, um comando por frase, sem pegadinha "
+                "de interpretacao — a dificuldade deve estar na geometria, nao no texto. "
+                "Para discalculia, prefira numeros inteiros e pequenos."
+            )
+
+        prompt = f"""Crie uma ATIVIDADE DE GEOMETRIA sobre: {titulo}
+
+SERIE/NIVEL: {serie}
+
+O QUE O PROFESSOR PEDIU:
+{conteudo}{adaptacoes_text}
+
+Cada exercicio deve ter uma FIGURA para o aluno observar. Voce nao desenha a
+figura agora — descreve em `figura_descricao` o que ela mostra, com TODAS as
+medidas, rotulos de vertice e marcacoes de angulo necessarias, de forma que
+outra pessoa consiga desenha-la sem ler o enunciado.
+
+RETORNE APENAS UM JSON com esta estrutura exata:
+{{
+  "titulo": "Titulo da atividade",
+  "introducao": "1 ou 2 frases situando o aluno no assunto",
+  "conceitos": [
+    {{"nome": "Teorema de Pitagoras", "definicao": "Explicacao curta em linguagem de {serie}", "formula": "a² = b² + c²"}}
+  ],
+  "exercicios": [
+    {{
+      "numero": 1,
+      "enunciado": "Pergunta completa, citando os rotulos que aparecem na figura",
+      "figura_descricao": "Triangulo retangulo ABC com angulo reto em B, cateto AB = 3 cm (vertical), cateto BC = 4 cm (horizontal), hipotenusa AC. Marcar o angulo reto em B e rotular os tres vertices e as duas medidas.",
+      "dica": "Empurrao inicial, sem entregar a resposta",
+      "resposta": "Resposta final, curta",
+      "resolucao": "Passo a passo do calculo, com as contas explicitas"
+    }}
+  ]
+}}
+
+REGRAS:
+1. Entre 4 e {MAX_EXERCICIOS_GEOMETRIA} exercicios, em dificuldade crescente.
+2. 2 a 4 conceitos, so os que a atividade realmente cobra.
+3. TODA medida citada no enunciado precisa aparecer tambem em `figura_descricao` — enunciado e figura nao podem se contradizer.
+4. Use numeros que fecham em resultado limpo sempre que possivel (3-4-5, 5-12-13, 6-8-10).
+5. Unidades sempre explicitas (cm, m, cm²).
+6. `resolucao` mostra a conta, nao so o resultado.
+7. RETORNE APENAS O JSON, sem markdown e sem explicacao."""
+
+        try:
+            response = self.client.messages.create(
+                model=self.model,
+                max_tokens=4000,
+                messages=[{"role": "user", "content": prompt}],
+            )
+
+            # Truncamento silencioso foi a causa raiz de "erro na geracao" sem
+            # pista nenhuma em Materiais Adaptados (ver ai_materiais_service).
+            # Aqui a checagem vem de fabrica.
+            if getattr(response, "stop_reason", None) == "max_tokens":
+                return {
+                    "success": False,
+                    "error": (
+                        "A resposta da IA foi cortada no limite de tokens. "
+                        "Peca um conteudo mais especifico (ex: so triangulos, "
+                        "so area de quadrilateros)."
+                    ),
+                }
+
+            texto = response.content[0].text.strip()
+            texto = texto.replace("```json", "").replace("```", "").strip()
+
+            try:
+                atividade = json.loads(texto)
+            except json.JSONDecodeError as je:
+                return {
+                    "success": False,
+                    "error": f"JSON invalido retornado pela IA: {je}",
+                }
+
+            exercicios: List[Dict[str, Any]] = atividade.get("exercicios") or []
+            if not isinstance(exercicios, list) or not exercicios:
+                return {"success": False, "error": "A IA nao devolveu nenhum exercicio."}
+
+            # Teto de custo: a IA pode devolver mais do que o prompt pediu, e
+            # cada exercicio a mais e mais uma chamada paga de figura.
+            exercicios = exercicios[:MAX_EXERCICIOS_GEOMETRIA]
+            atividade["exercicios"] = exercicios
+
+            with ThreadPoolExecutor(max_workers=_MAX_WORKERS_FIGURA) as executor:
+                list(executor.map(lambda ex: self._gerar_figura_svg(ex, serie), exercicios))
+
+            # O viewer usa isto para avisar o professor quando alguma figura
+            # nao saiu — antes de ele imprimir e descobrir na sala de aula.
+            atividade["figuras_geradas"] = sum(1 for ex in exercicios if ex.get("figura_svg"))
+            atividade["total_exercicios"] = len(exercicios)
+
+            return {
+                "success": True,
+                "json": atividade,
+                "tokens_used": response.usage.input_tokens + response.usage.output_tokens,
+            }
+
+        except Exception as e:
+            return {"success": False, "error": str(e)}
 
 
 # Instância global do service

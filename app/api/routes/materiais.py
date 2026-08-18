@@ -1,9 +1,5 @@
 """
-Rotas para Materiais de Estudo (Biblioteca) - conteudo no banco + agenda.
-
-O conteudo gerado pela IA fica em `Material.conteudo` desde 18/08/2026; o
-diretorio storage/materiais/ so e lido como fallback de material antigo.
-Ver app/services/material_conteudo.py para o porque.
+Rotas para Materiais de Estudo - COM STORAGE E AGENDA
 """
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Query
 from sqlalchemy import func
@@ -11,6 +7,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.exc import OperationalError
 from typing import List
 from datetime import time as dt_time
+import json
 import time
 
 from app.database import get_db, SessionLocal
@@ -26,11 +23,20 @@ from app.schemas.material import (
 from app.api.dependencies import get_current_active_user
 from app.core.tenant import enforce_limite_materiais
 from app.core.pagination import PaginationParams, build_page
-from app.services import material_conteudo
 from app.services.material_service import material_service
+from app.services.material_conteudo import formato_conteudo as _formato_conteudo
+from app.services.material_conteudo import ler_conteudo as _ler_conteudo
 from app.services.storage_service import storage_service
 
 router = APIRouter(prefix="/materiais", tags=["Materiais de Estudo"])
+
+# Quantas versoes ANTERIORES guardam o conteudo inline em historico_versoes.
+# O conteudo inline foi o que tirou o historico da dependencia do disco efemero
+# (migration 012), mas ele mora numa coluna JSON: uma atividade de geometria com
+# 6 SVGs pode passar de 50KB por versao. Sem teto, regenerar 30 vezes engorda a
+# linha sem limite. As versoes alem do teto continuam LISTADAS (numero, data,
+# prompt) — so perdem o conteudo, caindo no arquivo do storage se ele existir.
+MAX_VERSOES_COM_CONTEUDO = 5
 
 # Mesmos campos que app/api/routes/materiais_adaptados.py le do diagnostico do
 # aluno (Student.diagnosis, coluna JSON -> dict em Python).
@@ -63,9 +69,8 @@ def _rotular_diagnostico(diagnostico: dict) -> str:
 
 def gerar_material_background(material_id: int):
     """
-    Gera o conteúdo do material em background e grava na PROPRIA LINHA.
-    ESTRATÉGIA: busca dados (transação curta) -> gera sem banco aberto ->
-    UPDATE curto com o conteúdo + status.
+    Gera o conteúdo do material em background e salva no STORAGE
+    ESTRATÉGIA: Gera conteúdo, salva em arquivo, UPDATE rápido no banco
     """
     db_session = SessionLocal()
     
@@ -101,14 +106,12 @@ def gerar_material_background(material_id: int):
         print(f"📝 Gerando conteúdo para material {material_id}...")
         
         # ETAPA 2: GERAR CONTEÚDO (SEM BANCO)
-        #
-        # 2026-08-18: o conteudo era gravado em disco AQUI (storage_service) e
-        # a linha guardava so o caminho. O disco do Railway e efemero -> o
-        # arquivo sumia no redeploy seguinte e o material "desaparecia" da
-        # biblioteca. Agora o conteudo fica em memoria ate a ETAPA 3, que o
-        # grava na propria linha. Ver app/services/material_conteudo.py.
-        conteudo_gerado = None
+        arquivo_path = None
         conteudo_erro = None
+        # 2026-08-17: alem de gravar no storage (disco efemero no Railway — ver
+        # migration 012), o conteudo e guardado aqui para ir junto no UPDATE.
+        # `conteudo_gerado` e a partir de agora a fonte de verdade.
+        conteudo_gerado = None
         
         if material_tipo == TipoMaterial.VISUAL:
             resultado = material_service.gerar_material_visual(
@@ -120,7 +123,10 @@ def gerar_material_background(material_id: int):
             )
             
             if resultado["success"]:
+                # Salvar HTML em arquivo
                 conteudo_gerado = resultado["html"]
+                arquivo_path = storage_service.salvar_html(material_id, resultado["html"])
+                print(f"💾 HTML salvo em: storage/{arquivo_path}")
             else:
                 conteudo_erro = resultado.get("error")
         
@@ -134,7 +140,30 @@ def gerar_material_background(material_id: int):
             )
             
             if resultado["success"]:
-                conteudo_gerado = resultado["json"]
+                # Salvar JSON em arquivo
+                conteudo_gerado = json.dumps(resultado["json"], ensure_ascii=False)
+                arquivo_path = storage_service.salvar_json(material_id, resultado["json"])
+                print(f"💾 JSON salvo em: storage/{arquivo_path}")
+            else:
+                conteudo_erro = resultado.get("error")
+
+        elif material_tipo == TipoMaterial.GEOMETRIA:
+            # 2026-08-17 — atividade de geometria. Sai JSON (nao HTML): cada
+            # exercicio traz a figura em SVG ja sanitizado, e o frontend
+            # renderiza em GeometriaViewer.jsx. Ver o bloco de comentario em
+            # material_service.gerar_atividade_geometria sobre POR QUE a figura
+            # e SVG do Claude e nao imagem de difusao.
+            resultado = material_service.gerar_atividade_geometria(
+                titulo=material_titulo,
+                conteudo=material_prompt,
+                serie=material_serie,
+                adaptacoes=adaptacoes
+            )
+
+            if resultado["success"]:
+                conteudo_gerado = json.dumps(resultado["json"], ensure_ascii=False)
+                arquivo_path = storage_service.salvar_json(material_id, resultado["json"])
+                print(f"💾 JSON salvo em: storage/{arquivo_path}")
             else:
                 conteudo_erro = resultado.get("error")
         
@@ -154,12 +183,15 @@ def gerar_material_background(material_id: int):
             )
             if resultado["success"]:
                 conteudo_gerado = resultado["html"]
+                arquivo_path = storage_service.salvar_html(material_id, resultado["html"])
+                print(f"💾 HTML salvo em: storage/{arquivo_path}")
             else:
                 conteudo_erro = resultado.get("error")
         
         else:
-            # Tipo novo no enum sem tratamento aqui: falha explicita em vez de
-            # ficar em GERANDO para sempre (era o comportamento anterior).
+            # 2026-08-18: tipo novo no enum sem gerador aqui caia neste vazio e
+            # o material ficava em GERANDO para sempre - o professor via
+            # "Gerando..." indefinidamente, sem erro em lugar nenhum.
             conteudo_erro = f"Tipo de material '{material_tipo}' nao tem gerador implementado."
         
         print(f"✨ Conteúdo gerado! Atualizando banco...")
@@ -180,9 +212,13 @@ def gerar_material_background(material_id: int):
                     db_session.close()
                     return
                 
-                # UPDATE: conteudo vai para a propria linha (MEDIUMTEXT).
-                if conteudo_gerado is not None:
-                    material_conteudo.escrever(material, conteudo_gerado)
+                # UPDATE — o conteudo agora vai junto (ver migration 012). O
+                # criterio de "deu certo" passou a ser TER CONTEUDO, nao ter
+                # escrito um arquivo: em disco efemero o arquivo pode sumir, o
+                # conteudo na linha nao.
+                if conteudo_gerado:
+                    material.arquivo_path = arquivo_path
+                    material.conteudo_gerado = conteudo_gerado
                     material.status = StatusMaterial.DISPONIVEL
                 else:
                     material.status = StatusMaterial.ERRO
@@ -206,6 +242,10 @@ def gerar_material_background(material_id: int):
                     time.sleep(wait_time)
                 else:
                     print(f"❌ Material {material_id} falhou após {max_retries} tentativas: {str(e)}")
+                    
+                    # Deletar arquivo se criou
+                    if arquivo_path:
+                        storage_service.deletar(material_id)
                     
                     # Marcar como erro
                     try:
@@ -371,21 +411,22 @@ async def listar_materiais(
     # ------------------------------------------------------------------
     # 2026-08-18 - SELECT ENXUTO + FIM DO N+1
     # ------------------------------------------------------------------
-    # Duas coisas quebravam esta rota conforme a biblioteca crescia:
+    # Duas coisas pesavam nesta rota, e a migration 012 agravou a primeira:
     #
-    # 1. `db.query(Material)` traz TODAS as colunas - incluindo `conteudo_prompt`,
-    #    `metadados`, `historico_versoes` e (desde hoje) o `conteudo` do
-    #    material. Com ORDER BY em cima disso o MySQL faz filesort carregando
-    #    linhas enormes e responde "1038 Out of sort memory": a tela mostrava
-    #    "Nao foi possivel carregar os materiais" logo ao abrir.
+    # 1. `db.query(Material)` traz TODAS as colunas - agora incluindo
+    #    `conteudo_gerado` (LONGTEXT com o material inteiro). Com ORDER BY em
+    #    cima disso, o MySQL faz filesort carregando linhas enormes e responde
+    #    "1038 Out of sort memory" - exatamente o erro que derrubou o historico
+    #    de materiais adaptados. Aqui seriam 100 materiais completos por
+    #    pagina, para exibir uma lista de cards. (`conteudo_gerado` tambem e
+    #    deferred no model; o SELECT explicito abaixo deixa a intencao obvia.)
     #
     # 2. `len(material.materiais_alunos)` disparava um SELECT por material
     #    (o comentario antigo prometia eager-load, mas nao havia nenhum).
-    #    Com size=100, eram 100 queries extras por abertura de tela - parte
-    #    do "monte de SQL" no log do Railway.
+    #    Com size=100, 100 queries extras por abertura de tela.
     #
-    # Agora: uma query de COUNT, uma de pagina (so as colunas da lista) e uma
-    # de contagem de alunos agrupada. Tres queries, independente do tamanho.
+    # Agora: um COUNT, uma pagina (so as colunas da lista) e uma contagem
+    # agrupada. Tres queries, independente do tamanho da biblioteca.
     total = db.query(func.count(Material.id)).filter(*filtros).scalar() or 0
 
     materiais = (
@@ -462,10 +503,8 @@ async def obter_conteudo_material(
     db: Session = Depends(get_db)
 ):
     """
-    Obter o conteúdo do material.
-
-    Vem da propria linha (Material.conteudo); material antigo cai no arquivo em
-    disco, quando ele ainda existir. Retorna HTML ou JSON dependendo do tipo.
+    Obter o conteúdo do material do storage
+    Retorna HTML ou JSON dependendo do tipo
     """
     material = db.query(Material).filter(
         Material.id == material_id,
@@ -484,20 +523,17 @@ async def obter_conteudo_material(
             detail=f"Material não está disponível. Status: {material.status}"
         )
     
-    # Banco primeiro, disco so como fallback de material antigo
-    # (ver app/services/material_conteudo.py). Mapa mental e JSON; o resto HTML.
-    conteudo = material_conteudo.ler(material)
+    # Banco primeiro, storage como fallback (ver _ler_conteudo).
+    formato, conteudo = _ler_conteudo(material)
     if not conteudo:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=(
-                "O conteúdo deste material não está mais disponível. "
-                "Use 'Regenerar' para criá-lo novamente."
+                "Conteúdo do material não encontrado. Se o material é antigo, "
+                "use \"Regenerar\" para criar uma nova versão."
             )
         )
-
-    tipo_conteudo = "json" if material_conteudo.e_mapa_mental(material) else "html"
-    return {"tipo": tipo_conteudo, "conteudo": conteudo}
+    return {"tipo": formato, "conteudo": conteudo}
 
 
 @router.delete("/{material_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -506,8 +542,7 @@ async def deletar_material(
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
-    """Deletar um material (a linha leva junto o conteudo; o arquivo legado em
-    disco, se existir, tambem e removido)."""
+    """Deletar um material e seu arquivo"""
     material = db.query(Material).filter(
         Material.id == material_id,
         Material.criado_por_id == current_user.id
@@ -632,19 +667,29 @@ async def regenerar_material(
             detail="O material ainda está sendo gerado. Aguarde a conclusão."
         )
 
-    # Arquiva a versao atual. O conteudo vai para `conteudo_versoes` (banco);
-    # `historico_versoes` fica so com metadados, que e o que as telas leem.
+    # Arquiva a versao atual. 2026-08-17: o conteudo vai INLINE no historico —
+    # antes so guardavamos o nome do arquivo copiado no storage, que some no
+    # redeploy junto com o resto (migration 012). O arquivo continua sendo
+    # copiado como cache, mas nao e mais o que garante o historico.
+    ext = _formato_conteudo(material.tipo)
     versao_atual = material.versao or 1
-    arquivou = material_conteudo.arquivar_versao(material, versao_atual)
+    arquivo_versao = storage_service.arquivar_versao(material_id, versao_atual, ext)
+    conteudo_versao = material.conteudo_gerado
 
     historico = list(material.historico_versoes or [])
-    if arquivou:
+    if arquivo_versao or conteudo_versao:
         ref_data = material.atualizado_em or material.criado_em
         historico.append({
             "versao": versao_atual,
+            "arquivo_path": arquivo_versao,
+            "conteudo": conteudo_versao,
             "conteudo_prompt": material.conteudo_prompt,
             "criado_em": ref_data.isoformat() if ref_data else None,
         })
+
+    # Poda: so as N versoes mais recentes carregam o conteudo inline.
+    for entrada in historico[:-MAX_VERSOES_COM_CONTEUDO]:
+        entrada["conteudo"] = None
 
     material.historico_versoes = historico
     material.versao = versao_atual + 1
@@ -676,7 +721,15 @@ async def listar_versoes_material(
             detail="Material não encontrado"
         )
 
-    versoes_anteriores = list(material.historico_versoes or [])
+    # 2026-08-17: `conteudo` (inline desde a migration 012) e removido daqui.
+    # Esta rota so alimenta a LISTA do histórico na UI; devolver o HTML/JSON
+    # completo de cada versão faria a listagem carregar centenas de KB que a
+    # tela nem usa — o conteúdo tem rota própria
+    # (/materiais/{id}/versao/{versao}/conteudo), chamada só ao abrir a versão.
+    versoes_anteriores = [
+        {k: v for k, v in (entrada or {}).items() if k != "conteudo"}
+        for entrada in (material.historico_versoes or [])
+    ]
     return {
         "material_id": material.id,
         "versao_atual": material.versao or 1,
@@ -705,12 +758,31 @@ async def obter_conteudo_versao(
             detail="Material não encontrado"
         )
 
-    ext = "json" if material_conteudo.e_mapa_mental(material) else "html"
+    ext = _formato_conteudo(material.tipo)
 
     if versao == (material.versao or 1):
-        conteudo = material_conteudo.ler(material)
+        # Versao atual: mesma leitura da rota /conteudo (banco -> storage).
+        _, conteudo = _ler_conteudo(material)
     else:
-        conteudo = material_conteudo.ler_versao(material, versao)
+        # Versao arquivada: o conteudo inline do historico (2026-08-17) e a
+        # fonte de verdade; o arquivo versionado no storage e so fallback para
+        # versoes arquivadas antes desta mudanca.
+        conteudo = None
+        entrada = next(
+            (v for v in (material.historico_versoes or []) if v.get("versao") == versao),
+            None,
+        )
+        bruto = (entrada or {}).get("conteudo")
+        if bruto:
+            if ext == "json":
+                try:
+                    conteudo = json.loads(bruto)
+                except json.JSONDecodeError:
+                    conteudo = None
+            else:
+                conteudo = bruto
+        if conteudo is None:
+            conteudo = storage_service.ler_versao(material_id, versao, ext)
 
     if conteudo is None:
         raise HTTPException(
@@ -719,7 +791,7 @@ async def obter_conteudo_versao(
         )
 
     return {
-        "tipo": "json" if ext == "json" else "html",
+        "tipo": ext,
         "versao": versao,
         "conteudo": conteudo,
     }

@@ -46,17 +46,30 @@ class ImageProvider:
     def disponivel(self) -> bool:
         raise NotImplementedError
 
-    def gerar(self, prompt: str, *, tamanho: str = "quadrado") -> bytes:
+    def gerar(self, prompt: str, *, tamanho: str = "quadrado", formato: str = "png") -> bytes:
         """Gera a imagem e devolve os BYTES. Levanta ErroGeracaoImagem em falha."""
         raise NotImplementedError
 
 
 # Aspect ratios "amigaveis" -> dimensoes que os modelos Flux aceitam.
+#
+# 2026-08-17 — variantes COMPACTAS. Ilustracao que vira arquivo proprio
+# (Ilustracao.imagem_bytes) pode ser grande a vontade; ilustracao que vai
+# EMBUTIDA em base64 dentro do resultado_json do material adaptado, nao: um
+# album de 12 figurinhas em 1024x1024 PNG chegava a ~6,6MB de JSON, que e a
+# principal suspeita do commit ab2378f para o material nao salvar. Nesses
+# casos o chamador pede a variante compacta (ver ai_materiais_service).
 _DIMENSOES = {
     "quadrado": {"width": 1024, "height": 1024},
     "paisagem": {"width": 1344, "height": 768},
     "retrato": {"width": 768, "height": 1344},
+    "quadrado_compacto": {"width": 512, "height": 512},
+    "paisagem_compacta": {"width": 768, "height": 448},
 }
+
+# Formatos aceitos pelo provedor. jpeg pesa uma fracao do png para este tipo de
+# arte e a diferenca nao aparece na tela nem na impressao.
+_FORMATOS = {"png": "image/png", "jpeg": "image/jpeg"}
 
 
 class FluxProvider(ImageProvider):
@@ -78,7 +91,7 @@ class FluxProvider(ImageProvider):
     def disponivel(self) -> bool:
         return bool(self.api_key)
 
-    def gerar(self, prompt: str, *, tamanho: str = "quadrado") -> bytes:
+    def gerar(self, prompt: str, *, tamanho: str = "quadrado", formato: str = "png") -> bytes:
         if not self.disponivel():
             raise ProvedorImagemIndisponivel(
                 "FAL_API_KEY nao configurada. Defina a chave do fal.ai no .env/Railway "
@@ -86,11 +99,12 @@ class FluxProvider(ImageProvider):
             )
 
         dims = _DIMENSOES.get(tamanho, _DIMENSOES["quadrado"])
+        formato = formato if formato in _FORMATOS else "png"
         endpoint = "https://fal.run/%s" % self.model_id
         payload = {
             "prompt": prompt,
             "image_size": dims,          # aceita objeto {width,height} ou enum
-            "output_format": "png",
+            "output_format": formato,
             # Seguranca (publico infantil): checker on + tolerancia estrita.
             "enable_safety_checker": True,
         }

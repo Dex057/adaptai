@@ -89,7 +89,9 @@ def gerar_prompt_ilustracao(
     return "%s. Style: %s" % (base, _ESTILO)
 
 
-def gerar_ilustracao_ia(prompt: str, tamanho: str = "quadrado") -> bytes:
+def gerar_ilustracao_ia(
+    prompt: str, tamanho: str = "quadrado", formato: str = "png"
+) -> bytes:
     """Gera a imagem pelo provedor configurado. Repassa as excecoes tipadas do
     image_providers (ProvedorImagemIndisponivel / ErroGeracaoImagem) para a rota
     decidir o status HTTP.
@@ -107,12 +109,12 @@ def gerar_ilustracao_ia(prompt: str, tamanho: str = "quadrado") -> bytes:
     provedor = get_image_provider()
     t0 = time.perf_counter()
     try:
-        imagem = provedor.gerar(prompt, tamanho=tamanho)
+        imagem = provedor.gerar(prompt, tamanho=tamanho, formato=formato)
     except (ProvedorImagemIndisponivel, ErroGeracaoImagem) as exc:
         tm.record(
             model=provedor.model_id, provider=provedor.provider,
             operation="image_generation", feature=F.ILUSTRACAO_IA,
-            tags={"tamanho": tamanho},
+            tags={"tamanho": tamanho, "formato": formato},
             status="error", error_type=type(exc).__name__,
             duration_ms=int((time.perf_counter() - t0) * 1000),
         )
@@ -120,7 +122,7 @@ def gerar_ilustracao_ia(prompt: str, tamanho: str = "quadrado") -> bytes:
     tm.record(
         model=provedor.model_id, provider=provedor.provider,
         operation="image_generation", feature=F.ILUSTRACAO_IA,
-        tags={"tamanho": tamanho}, calls=1,
+        tags={"tamanho": tamanho, "formato": formato}, calls=1,
         duration_ms=int((time.perf_counter() - t0) * 1000),
     )
     return imagem

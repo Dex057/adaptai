@@ -126,13 +126,18 @@ class MaterialAdaptadoService:
         
         return parsed
 
+    # Formato/dimensao das imagens EMBUTIDAS (base64) no material adaptado.
+    # Separado das ilustracoes avulsas (Ilustracao.imagem_bytes), que podem ser
+    # grandes porque cada uma tem sua propria linha e sua propria rota.
+    _FORMATO_EMBUTIDO = "jpeg"
+
     def _ilustrar_itens(
         self,
         itens: List[Dict[str, Any]],
         campo_descricao: str,
-        tamanho: str = "quadrado",
+        tamanho: str = "quadrado_compacto",
         limite: int = None,
-    ) -> List[Dict[str, Any]]:
+    ) -> Dict[str, Any]:
         """Gera uma ilustracao IA (Flux via fal.ai) para cada item de uma lista,
         em paralelo, e MUTA cada item adicionando `imagem_gerada` (data URI
         base64 pronta para <img src>).
@@ -149,9 +154,16 @@ class MaterialAdaptadoService:
             (rede) — gerar 6 imagens em serie multiplicaria o tempo por 6.
           - Imagem embutida como data URI base64 DIRETO no item, sem tabela
             nova nem rota de arquivo — reaproveita o `resultado_json` que ja
-            e o "cache" do material adaptado (MaterialAdaptadoGerado). Troca
-            simplicidade por tamanho do JSON no banco (uma imagem ~150-400KB
-            vira ~200-550KB em base64); reavaliar se o volume crescer muito.
+            e o "cache" do material adaptado (MaterialAdaptadoGerado).
+            2026-08-17: esse embutido e justamente o que se suspeita ter
+            derrubado o salvamento do material (ver o comentario de
+            ab2378f em routes/materiais_adaptados.py — resultado_json chegando
+            a ~6,6MB). Enquanto o embutido continua (a alternativa e uma tabela
+            + rota novas), o PESO caiu por dois caminhos: dimensao COMPACTA
+            (512/768 em vez de 1024/1344) e JPEG em vez de PNG. Na pratica um
+            album de 12 figurinhas sai de ~6MB para menos de 1MB, com
+            diferenca visual imperceptivel no tamanho em que a imagem e
+            exibida (celula de grade / quadrinho).
           - Falha por item (rede, provedor indisponivel, filtro de seguranca)
             NAO derruba o material inteiro: o item so fica sem
             `imagem_gerada`, e o front cai no texto (`cenario`/
@@ -162,18 +174,32 @@ class MaterialAdaptadoService:
           - `limite`: a IA pode devolver mais itens do que o prompt pede; sem
             teto, um album generoso multiplicaria chamadas pagas sem controle
             (ver MAX_IMAGENS_HQ / MAX_IMAGENS_ALBUM).
+
+        Devolve um DIAGNOSTICO (2026-08-17) que o chamador anexa ao material
+        como `ilustracoes_status`:
+
+            {"solicitadas": int, "geradas": int, "motivo": str|None}
+
+        POR QUE: ate aqui, "sem FAL_API_KEY" e "o provedor recusou" produziam
+        exatamente o mesmo resultado visivel — o material vinha so com texto,
+        sem nenhum aviso. O professor abria a HQ, via as molduras vazias e nao
+        tinha como saber se era falha, falta de configuracao ou se o recurso
+        simplesmente nao existia. Relatado como "nao consigo ver as imagens dos
+        materiais adaptados". A geracao continua degradando com elegancia (nunca
+        derruba o material); agora ela diz por que.
         """
         if not itens:
-            return itens
+            return {"solicitadas": 0, "geradas": 0, "motivo": None}
+
+        alvo = itens[:limite] if limite else itens
+        solicitadas = sum(1 for i in alvo if (i.get(campo_descricao) or "").strip())
 
         try:
             provedor = get_image_provider()
         except ProvedorImagemIndisponivel:
-            return itens
+            return {"solicitadas": solicitadas, "geradas": 0, "motivo": "provedor_indisponivel"}
         if not provedor.disponivel():
-            return itens
-
-        alvo = itens[:limite] if limite else itens
+            return {"solicitadas": solicitadas, "geradas": 0, "motivo": "sem_chave"}
 
         def _gerar(item: Dict[str, Any]) -> None:
             descricao = (item.get(campo_descricao) or "").strip()
@@ -181,9 +207,12 @@ class MaterialAdaptadoService:
                 return
             try:
                 prompt = ilustracao_service.gerar_prompt_ilustracao("material", descricao)
-                image_bytes = ilustracao_service.gerar_ilustracao_ia(prompt, tamanho=tamanho)
+                image_bytes = ilustracao_service.gerar_ilustracao_ia(
+                    prompt, tamanho=tamanho, formato=self._FORMATO_EMBUTIDO
+                )
                 item["imagem_gerada"] = (
-                    "data:image/png;base64," + base64.b64encode(image_bytes).decode("ascii")
+                    "data:image/%s;base64," % self._FORMATO_EMBUTIDO
+                    + base64.b64encode(image_bytes).decode("ascii")
                 )
             except (ProvedorImagemIndisponivel, ErroGeracaoImagem) as e:
                 logger.warning("Falha ao ilustrar item ('%s...'): %s", descricao[:40], e)
@@ -193,7 +222,13 @@ class MaterialAdaptadoService:
         with ThreadPoolExecutor(max_workers=_MAX_WORKERS_ILUSTRACAO) as executor:
             list(executor.map(_gerar, alvo))
 
-        return itens
+        geradas = sum(1 for i in alvo if i.get("imagem_gerada"))
+        motivo = None
+        if geradas == 0 and solicitadas > 0:
+            motivo = "falha_geracao"
+        elif geradas < solicitadas:
+            motivo = "parcial"
+        return {"solicitadas": solicitadas, "geradas": geradas, "motivo": motivo}
 
     # ==========================================================================
     # ADAPTACAO POR PERFIL DO ALUNO — 2026-08-11
@@ -430,10 +465,10 @@ Retorne APENAS o JSON."""
         # 2026-08-15: cada quadrinho ganha uma ilustracao de verdade (Flux via
         # fal.ai) a partir de `cenario` — antes so o texto da cena existia.
         # "paisagem" porque quadrinho de HQ costuma ser mais largo que alto.
-        self._ilustrar_itens(
+        resultado["ilustracoes_status"] = self._ilustrar_itens(
             resultado.get("quadrinhos") or [],
             campo_descricao="cenario",
-            tamanho="paisagem",
+            tamanho="paisagem_compacta",
             limite=MAX_IMAGENS_HQ,
         )
         return resultado
@@ -571,10 +606,10 @@ Retorne APENAS o JSON."""
         # entao o efeito aparece direto dentro de `categorias` tambem.
         categorias = resultado.get("categorias") or []
         todas_figurinhas = [f for cat in categorias for f in (cat.get("figurinhas") or [])]
-        self._ilustrar_itens(
+        resultado["ilustracoes_status"] = self._ilustrar_itens(
             todas_figurinhas,
             campo_descricao="imagem_descricao",
-            tamanho="quadrado",
+            tamanho="quadrado_compacto",
             limite=MAX_IMAGENS_ALBUM,
         )
         return resultado

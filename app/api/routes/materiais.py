@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.exc import OperationalError
 from typing import List
 from datetime import time as dt_time
+import json
 import time
 
 from app.database import get_db, SessionLocal
@@ -22,9 +23,19 @@ from app.api.dependencies import get_current_active_user
 from app.core.tenant import enforce_limite_materiais
 from app.core.pagination import PaginationParams, build_page
 from app.services.material_service import material_service
+from app.services.material_conteudo import formato_conteudo as _formato_conteudo
+from app.services.material_conteudo import ler_conteudo as _ler_conteudo
 from app.services.storage_service import storage_service
 
 router = APIRouter(prefix="/materiais", tags=["Materiais de Estudo"])
+
+# Quantas versoes ANTERIORES guardam o conteudo inline em historico_versoes.
+# O conteudo inline foi o que tirou o historico da dependencia do disco efemero
+# (migration 012), mas ele mora numa coluna JSON: uma atividade de geometria com
+# 6 SVGs pode passar de 50KB por versao. Sem teto, regenerar 30 vezes engorda a
+# linha sem limite. As versoes alem do teto continuam LISTADAS (numero, data,
+# prompt) — so perdem o conteudo, caindo no arquivo do storage se ele existir.
+MAX_VERSOES_COM_CONTEUDO = 5
 
 # Mesmos campos que app/api/routes/materiais_adaptados.py le do diagnostico do
 # aluno (Student.diagnosis, coluna JSON -> dict em Python).
@@ -96,6 +107,10 @@ def gerar_material_background(material_id: int):
         # ETAPA 2: GERAR CONTEÚDO (SEM BANCO)
         arquivo_path = None
         conteudo_erro = None
+        # 2026-08-17: alem de gravar no storage (disco efemero no Railway — ver
+        # migration 012), o conteudo e guardado aqui para ir junto no UPDATE.
+        # `conteudo_gerado` e a partir de agora a fonte de verdade.
+        conteudo_gerado = None
         
         if material_tipo == TipoMaterial.VISUAL:
             resultado = material_service.gerar_material_visual(
@@ -108,6 +123,7 @@ def gerar_material_background(material_id: int):
             
             if resultado["success"]:
                 # Salvar HTML em arquivo
+                conteudo_gerado = resultado["html"]
                 arquivo_path = storage_service.salvar_html(material_id, resultado["html"])
                 print(f"💾 HTML salvo em: storage/{arquivo_path}")
             else:
@@ -124,6 +140,27 @@ def gerar_material_background(material_id: int):
             
             if resultado["success"]:
                 # Salvar JSON em arquivo
+                conteudo_gerado = json.dumps(resultado["json"], ensure_ascii=False)
+                arquivo_path = storage_service.salvar_json(material_id, resultado["json"])
+                print(f"💾 JSON salvo em: storage/{arquivo_path}")
+            else:
+                conteudo_erro = resultado.get("error")
+
+        elif material_tipo == TipoMaterial.GEOMETRIA:
+            # 2026-08-17 — atividade de geometria. Sai JSON (nao HTML): cada
+            # exercicio traz a figura em SVG ja sanitizado, e o frontend
+            # renderiza em GeometriaViewer.jsx. Ver o bloco de comentario em
+            # material_service.gerar_atividade_geometria sobre POR QUE a figura
+            # e SVG do Claude e nao imagem de difusao.
+            resultado = material_service.gerar_atividade_geometria(
+                titulo=material_titulo,
+                conteudo=material_prompt,
+                serie=material_serie,
+                adaptacoes=adaptacoes
+            )
+
+            if resultado["success"]:
+                conteudo_gerado = json.dumps(resultado["json"], ensure_ascii=False)
                 arquivo_path = storage_service.salvar_json(material_id, resultado["json"])
                 print(f"💾 JSON salvo em: storage/{arquivo_path}")
             else:
@@ -144,6 +181,7 @@ def gerar_material_background(material_id: int):
                 adaptacoes=adaptacoes
             )
             if resultado["success"]:
+                conteudo_gerado = resultado["html"]
                 arquivo_path = storage_service.salvar_html(material_id, resultado["html"])
                 print(f"💾 HTML salvo em: storage/{arquivo_path}")
             else:
@@ -167,9 +205,13 @@ def gerar_material_background(material_id: int):
                     db_session.close()
                     return
                 
-                # UPDATE RÁPIDO - só campos pequenos!
-                if arquivo_path:
+                # UPDATE — o conteudo agora vai junto (ver migration 012). O
+                # criterio de "deu certo" passou a ser TER CONTEUDO, nao ter
+                # escrito um arquivo: em disco efemero o arquivo pode sumir, o
+                # conteudo na linha nao.
+                if conteudo_gerado:
                     material.arquivo_path = arquivo_path
+                    material.conteudo_gerado = conteudo_gerado
                     material.status = StatusMaterial.DISPONIVEL
                 else:
                     material.status = StatusMaterial.ERRO
@@ -432,23 +474,17 @@ async def obter_conteudo_material(
             detail=f"Material não está disponível. Status: {material.status}"
         )
     
-    # Ler do storage: mapa mental e JSON; os demais formatos sao HTML
-    if material.tipo == TipoMaterial.MAPA_MENTAL:
-        conteudo = storage_service.ler_json(material_id)
-        if not conteudo:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Conteúdo do material não encontrado no storage"
+    # Banco primeiro, storage como fallback (ver _ler_conteudo).
+    formato, conteudo = _ler_conteudo(material)
+    if not conteudo:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                "Conteúdo do material não encontrado. Se o material é antigo, "
+                "use \"Regenerar\" para criar uma nova versão."
             )
-        return {"tipo": "json", "conteudo": conteudo}
-    else:
-        conteudo = storage_service.ler_html(material_id)
-        if not conteudo:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Conteúdo do material não encontrado no storage"
-            )
-        return {"tipo": "html", "conteudo": conteudo}
+        )
+    return {"tipo": formato, "conteudo": conteudo}
 
 
 @router.delete("/{material_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -582,20 +618,29 @@ async def regenerar_material(
             detail="O material ainda está sendo gerado. Aguarde a conclusão."
         )
 
-    # Arquiva a versao atual (se houver arquivo gerado)
-    ext = "json" if material.tipo == TipoMaterial.MAPA_MENTAL else "html"
+    # Arquiva a versao atual. 2026-08-17: o conteudo vai INLINE no historico —
+    # antes so guardavamos o nome do arquivo copiado no storage, que some no
+    # redeploy junto com o resto (migration 012). O arquivo continua sendo
+    # copiado como cache, mas nao e mais o que garante o historico.
+    ext = _formato_conteudo(material.tipo)
     versao_atual = material.versao or 1
     arquivo_versao = storage_service.arquivar_versao(material_id, versao_atual, ext)
+    conteudo_versao = material.conteudo_gerado
 
     historico = list(material.historico_versoes or [])
-    if arquivo_versao:
+    if arquivo_versao or conteudo_versao:
         ref_data = material.atualizado_em or material.criado_em
         historico.append({
             "versao": versao_atual,
             "arquivo_path": arquivo_versao,
+            "conteudo": conteudo_versao,
             "conteudo_prompt": material.conteudo_prompt,
             "criado_em": ref_data.isoformat() if ref_data else None,
         })
+
+    # Poda: so as N versoes mais recentes carregam o conteudo inline.
+    for entrada in historico[:-MAX_VERSOES_COM_CONTEUDO]:
+        entrada["conteudo"] = None
 
     material.historico_versoes = historico
     material.versao = versao_atual + 1
@@ -627,7 +672,15 @@ async def listar_versoes_material(
             detail="Material não encontrado"
         )
 
-    versoes_anteriores = list(material.historico_versoes or [])
+    # 2026-08-17: `conteudo` (inline desde a migration 012) e removido daqui.
+    # Esta rota so alimenta a LISTA do histórico na UI; devolver o HTML/JSON
+    # completo de cada versão faria a listagem carregar centenas de KB que a
+    # tela nem usa — o conteúdo tem rota própria
+    # (/materiais/{id}/versao/{versao}/conteudo), chamada só ao abrir a versão.
+    versoes_anteriores = [
+        {k: v for k, v in (entrada or {}).items() if k != "conteudo"}
+        for entrada in (material.historico_versoes or [])
+    ]
     return {
         "material_id": material.id,
         "versao_atual": material.versao or 1,
@@ -656,13 +709,31 @@ async def obter_conteudo_versao(
             detail="Material não encontrado"
         )
 
-    ext = "json" if material.tipo == TipoMaterial.MAPA_MENTAL else "html"
+    ext = _formato_conteudo(material.tipo)
 
     if versao == (material.versao or 1):
-        # Versao atual = arquivo canonico
-        conteudo = storage_service.ler_json(material_id) if ext == "json" else storage_service.ler_html(material_id)
+        # Versao atual: mesma leitura da rota /conteudo (banco -> storage).
+        _, conteudo = _ler_conteudo(material)
     else:
-        conteudo = storage_service.ler_versao(material_id, versao, ext)
+        # Versao arquivada: o conteudo inline do historico (2026-08-17) e a
+        # fonte de verdade; o arquivo versionado no storage e so fallback para
+        # versoes arquivadas antes desta mudanca.
+        conteudo = None
+        entrada = next(
+            (v for v in (material.historico_versoes or []) if v.get("versao") == versao),
+            None,
+        )
+        bruto = (entrada or {}).get("conteudo")
+        if bruto:
+            if ext == "json":
+                try:
+                    conteudo = json.loads(bruto)
+                except json.JSONDecodeError:
+                    conteudo = None
+            else:
+                conteudo = bruto
+        if conteudo is None:
+            conteudo = storage_service.ler_versao(material_id, versao, ext)
 
     if conteudo is None:
         raise HTTPException(
@@ -671,7 +742,7 @@ async def obter_conteudo_versao(
         )
 
     return {
-        "tipo": "json" if ext == "json" else "html",
+        "tipo": ext,
         "versao": versao,
         "conteudo": conteudo,
     }

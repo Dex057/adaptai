@@ -45,6 +45,24 @@ causa raiz não estiver clara.
 - `docs/CORRECOES-2026-08-11.md` — rodada de correções (materiais adaptados,
   planejamento 404, encoding, toasts, rótulos). Traz sintoma → causa raiz → correção
   de cada item e a lista de pendências conscientes.
+- `docs/CORRECOES-2026-08-18.md` — rodada de geração de materiais: conteúdo da
+  Biblioteca saiu do disco efêmero para o banco (`Material.conteudo`), fim do
+  `1038 Out of sort memory` nas listagens (`resultado_json` virou `deferred`),
+  N+1 removidos e piso de tokens por tipo. **Requer a
+  `migrations/012_materiais_conteudo_no_banco.sql` aplicada antes do deploy.**
+
+## Conteúdo de material NUNCA vai para disco
+
+O serviço web do Railway roda em **disco efêmero**: qualquer arquivo em
+`storage/` some no próximo redeploy, enquanto a linha no banco continua dizendo
+que está tudo pronto. Já queimou duas vezes (ilustrações → migration 011;
+materiais → migration 012).
+
+Ao gravar qualquer artefato gerado, use uma coluna:
+`Material.conteudo` (via `app/services/material_conteudo.py`) ou
+`Ilustracao.imagem_bytes`. Colunas grandes devem nascer `deferred` — se
+entrarem num `SELECT *` com `ORDER BY`, o MySQL responde
+`1038 Out of sort memory` e a listagem inteira cai.
 
 ## Homologação de tipos de material adaptado
 

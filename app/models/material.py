@@ -1,8 +1,9 @@
 """
 Modelos para Materiais de Estudo
 """
-from sqlalchemy import Column, Integer, String, Text, DateTime, JSON, ForeignKey, Enum as SQLEnum
-from sqlalchemy.orm import relationship
+from sqlalchemy import Column, Integer, String, Text, DateTime, JSON, ForeignKey, Index, Enum as SQLEnum
+from sqlalchemy.dialects.mysql import MEDIUMTEXT
+from sqlalchemy.orm import relationship, deferred
 from sqlalchemy.sql import func
 from enum import Enum
 from app.database import Base
@@ -28,7 +29,13 @@ class StatusMaterial(str, Enum):
 class Material(Base):
     """Material de estudo gerado por IA"""
     __tablename__ = "materiais"
-    __table_args__ = {'schema': None}
+    # Indice composto para GET /materiais/ (WHERE criado_por_id ORDER BY criado_em
+    # DESC). Sem ele o MySQL varre a tabela e ordena em filesort - ver
+    # migrations/012_materiais_conteudo_no_banco.sql.
+    __table_args__ = (
+        Index("ix_materiais_criado_por_criado_em", "criado_por_id", "criado_em"),
+        {'schema': None},
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     titulo = Column(String(200), nullable=False, index=True)
@@ -39,8 +46,34 @@ class Material(Base):
     serie_nivel = Column(String(50), nullable=True)
     tags = Column(JSON, nullable=True)
     
-    # Caminho do arquivo no storage
+    # Caminho do arquivo no storage (LEGADO - ver `conteudo` abaixo)
     arquivo_path = Column(String(255), nullable=True)  # Ex: "123_visual.html"
+
+    # ------------------------------------------------------------------
+    # 2026-08-18 - CONTEUDO NO BANCO, NAO EM DISCO
+    # ------------------------------------------------------------------
+    # O HTML/JSON gerado pela IA era gravado SO em backend/storage/materiais/
+    # e a linha guardava apenas `arquivo_path`. O servico web do Railway roda
+    # em disco EFEMERO: a cada redeploy os arquivos somem, enquanto a linha
+    # continua com status='disponivel'. Resultado pro professor: o material
+    # "some" da biblioteca (na verdade a linha esta la, o conteudo e que nao
+    # existe mais) e GET /materiais/{id}/conteudo devolve 404.
+    #
+    # Mesma causa raiz ja corrigida para `ilustracoes` na migration 011 -
+    # aqui e a mesma correcao: os bytes moram NA LINHA.
+    #
+    # `deferred`: a coluna NAO entra em `SELECT materiais.*`. Isso importa
+    # alem do trafego - com colunas grandes no SELECT, o ORDER BY da listagem
+    # vira filesort de linhas enormes e o MySQL responde
+    # "1038 Out of sort memory". So carrega quando alguem le
+    # `material.conteudo` de fato (rota de conteudo).
+    conteudo = deferred(Column(MEDIUMTEXT().with_variant(Text, "sqlite"), nullable=True))
+
+    # Conteudo das versoes ARQUIVADAS: {"1": "<html>...", "2": "..."}.
+    # Separado de `historico_versoes` (que fica so com metadados e continua
+    # sendo serializado no MaterialResponse) justamente para nao inflar a
+    # resposta de todas as rotas de detalhe.
+    conteudo_versoes = deferred(Column(JSON, nullable=True))
     
     # Metadados
     metadados = Column(JSON, nullable=True)  # Tokens usados, tempo de geração, etc

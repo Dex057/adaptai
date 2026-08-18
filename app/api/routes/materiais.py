@@ -1,7 +1,12 @@
 """
-Rotas para Materiais de Estudo - COM STORAGE E AGENDA
+Rotas para Materiais de Estudo (Biblioteca) - conteudo no banco + agenda.
+
+O conteudo gerado pela IA fica em `Material.conteudo` desde 18/08/2026; o
+diretorio storage/materiais/ so e lido como fallback de material antigo.
+Ver app/services/material_conteudo.py para o porque.
 """
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Query
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import OperationalError
 from typing import List
@@ -21,6 +26,7 @@ from app.schemas.material import (
 from app.api.dependencies import get_current_active_user
 from app.core.tenant import enforce_limite_materiais
 from app.core.pagination import PaginationParams, build_page
+from app.services import material_conteudo
 from app.services.material_service import material_service
 from app.services.storage_service import storage_service
 
@@ -57,8 +63,9 @@ def _rotular_diagnostico(diagnostico: dict) -> str:
 
 def gerar_material_background(material_id: int):
     """
-    Gera o conteúdo do material em background e salva no STORAGE
-    ESTRATÉGIA: Gera conteúdo, salva em arquivo, UPDATE rápido no banco
+    Gera o conteúdo do material em background e grava na PROPRIA LINHA.
+    ESTRATÉGIA: busca dados (transação curta) -> gera sem banco aberto ->
+    UPDATE curto com o conteúdo + status.
     """
     db_session = SessionLocal()
     
@@ -94,7 +101,13 @@ def gerar_material_background(material_id: int):
         print(f"📝 Gerando conteúdo para material {material_id}...")
         
         # ETAPA 2: GERAR CONTEÚDO (SEM BANCO)
-        arquivo_path = None
+        #
+        # 2026-08-18: o conteudo era gravado em disco AQUI (storage_service) e
+        # a linha guardava so o caminho. O disco do Railway e efemero -> o
+        # arquivo sumia no redeploy seguinte e o material "desaparecia" da
+        # biblioteca. Agora o conteudo fica em memoria ate a ETAPA 3, que o
+        # grava na propria linha. Ver app/services/material_conteudo.py.
+        conteudo_gerado = None
         conteudo_erro = None
         
         if material_tipo == TipoMaterial.VISUAL:
@@ -107,9 +120,7 @@ def gerar_material_background(material_id: int):
             )
             
             if resultado["success"]:
-                # Salvar HTML em arquivo
-                arquivo_path = storage_service.salvar_html(material_id, resultado["html"])
-                print(f"💾 HTML salvo em: storage/{arquivo_path}")
+                conteudo_gerado = resultado["html"]
             else:
                 conteudo_erro = resultado.get("error")
         
@@ -123,9 +134,7 @@ def gerar_material_background(material_id: int):
             )
             
             if resultado["success"]:
-                # Salvar JSON em arquivo
-                arquivo_path = storage_service.salvar_json(material_id, resultado["json"])
-                print(f"💾 JSON salvo em: storage/{arquivo_path}")
+                conteudo_gerado = resultado["json"]
             else:
                 conteudo_erro = resultado.get("error")
         
@@ -144,10 +153,14 @@ def gerar_material_background(material_id: int):
                 adaptacoes=adaptacoes
             )
             if resultado["success"]:
-                arquivo_path = storage_service.salvar_html(material_id, resultado["html"])
-                print(f"💾 HTML salvo em: storage/{arquivo_path}")
+                conteudo_gerado = resultado["html"]
             else:
                 conteudo_erro = resultado.get("error")
+        
+        else:
+            # Tipo novo no enum sem tratamento aqui: falha explicita em vez de
+            # ficar em GERANDO para sempre (era o comportamento anterior).
+            conteudo_erro = f"Tipo de material '{material_tipo}' nao tem gerador implementado."
         
         print(f"✨ Conteúdo gerado! Atualizando banco...")
         
@@ -167,9 +180,9 @@ def gerar_material_background(material_id: int):
                     db_session.close()
                     return
                 
-                # UPDATE RÁPIDO - só campos pequenos!
-                if arquivo_path:
-                    material.arquivo_path = arquivo_path
+                # UPDATE: conteudo vai para a propria linha (MEDIUMTEXT).
+                if conteudo_gerado is not None:
+                    material_conteudo.escrever(material, conteudo_gerado)
                     material.status = StatusMaterial.DISPONIVEL
                 else:
                     material.status = StatusMaterial.ERRO
@@ -193,10 +206,6 @@ def gerar_material_background(material_id: int):
                     time.sleep(wait_time)
                 else:
                     print(f"❌ Material {material_id} falhou após {max_retries} tentativas: {str(e)}")
-                    
-                    # Deletar arquivo se criou
-                    if arquivo_path:
-                        storage_service.deletar(material_id)
                     
                     # Marcar como erro
                     try:
@@ -347,40 +356,81 @@ async def listar_materiais(
     IMPORTANTE: Endpoint mudou para formato paginado. Frontend antigo que espera
     array puro precisa acessar response.items ao inves de response direto.
     """
-    query = db.query(Material).filter(Material.criado_por_id == current_user.id)
-
     # 2026-08-11: antes era `Material.tipo == tipo.upper()`, comparando com
     # "VISUAL" enquanto TipoMaterial usa valores minusculos ("visual"). O
     # SQLAlchemy tentava TipoMaterial("VISUAL") e levantava LookupError -> 500.
     # Na pratica, clicar nas abas "Visuais" / "Mapas Mentais" quebrava a
     # listagem. Tipando o parametro como o proprio Enum, o FastAPI valida e
     # converte antes de chegar aqui (e o Swagger ganha um dropdown).
+    filtros = [Material.criado_por_id == current_user.id]
     if tipo:
-        query = query.filter(Material.tipo == tipo)
-
+        filtros.append(Material.tipo == tipo)
     if materia:
-        query = query.filter(Material.materia == materia)
-    
-    query = query.order_by(Material.criado_em.desc())
-    
-    total = query.count()
-    materiais = query.offset(pagination.offset).limit(pagination.limit).all()
-    
-    # Serializar com total de alunos (eager-load relationship evita N+1)
-    items = []
-    for material in materiais:
-        items.append({
-            "id": material.id,
-            "titulo": material.titulo,
-            "descricao": material.descricao,
-            "tipo": material.tipo,
-            "materia": material.materia,
-            "serie_nivel": material.serie_nivel,
-            "status": material.status,
-            "criado_em": material.criado_em,
-            "total_alunos": len(material.materiais_alunos),
-        })
-    
+        filtros.append(Material.materia == materia)
+
+    # ------------------------------------------------------------------
+    # 2026-08-18 - SELECT ENXUTO + FIM DO N+1
+    # ------------------------------------------------------------------
+    # Duas coisas quebravam esta rota conforme a biblioteca crescia:
+    #
+    # 1. `db.query(Material)` traz TODAS as colunas - incluindo `conteudo_prompt`,
+    #    `metadados`, `historico_versoes` e (desde hoje) o `conteudo` do
+    #    material. Com ORDER BY em cima disso o MySQL faz filesort carregando
+    #    linhas enormes e responde "1038 Out of sort memory": a tela mostrava
+    #    "Nao foi possivel carregar os materiais" logo ao abrir.
+    #
+    # 2. `len(material.materiais_alunos)` disparava um SELECT por material
+    #    (o comentario antigo prometia eager-load, mas nao havia nenhum).
+    #    Com size=100, eram 100 queries extras por abertura de tela - parte
+    #    do "monte de SQL" no log do Railway.
+    #
+    # Agora: uma query de COUNT, uma de pagina (so as colunas da lista) e uma
+    # de contagem de alunos agrupada. Tres queries, independente do tamanho.
+    total = db.query(func.count(Material.id)).filter(*filtros).scalar() or 0
+
+    materiais = (
+        db.query(
+            Material.id,
+            Material.titulo,
+            Material.descricao,
+            Material.tipo,
+            Material.materia,
+            Material.serie_nivel,
+            Material.status,
+            Material.criado_em,
+        )
+        .filter(*filtros)
+        .order_by(Material.criado_em.desc(), Material.id.desc())
+        .offset(pagination.offset)
+        .limit(pagination.limit)
+        .all()
+    )
+
+    ids = [m.id for m in materiais]
+    alunos_por_material = {}
+    if ids:
+        alunos_por_material = dict(
+            db.query(MaterialAluno.material_id, func.count(MaterialAluno.id))
+            .filter(MaterialAluno.material_id.in_(ids))
+            .group_by(MaterialAluno.material_id)
+            .all()
+        )
+
+    items = [
+        {
+            "id": m.id,
+            "titulo": m.titulo,
+            "descricao": m.descricao,
+            "tipo": m.tipo,
+            "materia": m.materia,
+            "serie_nivel": m.serie_nivel,
+            "status": m.status,
+            "criado_em": m.criado_em,
+            "total_alunos": alunos_por_material.get(m.id, 0),
+        }
+        for m in materiais
+    ]
+
     return build_page(items=items, total=total, pagination=pagination)
 
 
@@ -412,8 +462,10 @@ async def obter_conteudo_material(
     db: Session = Depends(get_db)
 ):
     """
-    Obter o conteúdo do material do storage
-    Retorna HTML ou JSON dependendo do tipo
+    Obter o conteúdo do material.
+
+    Vem da propria linha (Material.conteudo); material antigo cai no arquivo em
+    disco, quando ele ainda existir. Retorna HTML ou JSON dependendo do tipo.
     """
     material = db.query(Material).filter(
         Material.id == material_id,
@@ -432,23 +484,20 @@ async def obter_conteudo_material(
             detail=f"Material não está disponível. Status: {material.status}"
         )
     
-    # Ler do storage: mapa mental e JSON; os demais formatos sao HTML
-    if material.tipo == TipoMaterial.MAPA_MENTAL:
-        conteudo = storage_service.ler_json(material_id)
-        if not conteudo:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Conteúdo do material não encontrado no storage"
+    # Banco primeiro, disco so como fallback de material antigo
+    # (ver app/services/material_conteudo.py). Mapa mental e JSON; o resto HTML.
+    conteudo = material_conteudo.ler(material)
+    if not conteudo:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                "O conteúdo deste material não está mais disponível. "
+                "Use 'Regenerar' para criá-lo novamente."
             )
-        return {"tipo": "json", "conteudo": conteudo}
-    else:
-        conteudo = storage_service.ler_html(material_id)
-        if not conteudo:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Conteúdo do material não encontrado no storage"
-            )
-        return {"tipo": "html", "conteudo": conteudo}
+        )
+
+    tipo_conteudo = "json" if material_conteudo.e_mapa_mental(material) else "html"
+    return {"tipo": tipo_conteudo, "conteudo": conteudo}
 
 
 @router.delete("/{material_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -457,7 +506,8 @@ async def deletar_material(
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
-    """Deletar um material e seu arquivo"""
+    """Deletar um material (a linha leva junto o conteudo; o arquivo legado em
+    disco, se existir, tambem e removido)."""
     material = db.query(Material).filter(
         Material.id == material_id,
         Material.criado_por_id == current_user.id
@@ -582,17 +632,16 @@ async def regenerar_material(
             detail="O material ainda está sendo gerado. Aguarde a conclusão."
         )
 
-    # Arquiva a versao atual (se houver arquivo gerado)
-    ext = "json" if material.tipo == TipoMaterial.MAPA_MENTAL else "html"
+    # Arquiva a versao atual. O conteudo vai para `conteudo_versoes` (banco);
+    # `historico_versoes` fica so com metadados, que e o que as telas leem.
     versao_atual = material.versao or 1
-    arquivo_versao = storage_service.arquivar_versao(material_id, versao_atual, ext)
+    arquivou = material_conteudo.arquivar_versao(material, versao_atual)
 
     historico = list(material.historico_versoes or [])
-    if arquivo_versao:
+    if arquivou:
         ref_data = material.atualizado_em or material.criado_em
         historico.append({
             "versao": versao_atual,
-            "arquivo_path": arquivo_versao,
             "conteudo_prompt": material.conteudo_prompt,
             "criado_em": ref_data.isoformat() if ref_data else None,
         })
@@ -656,13 +705,12 @@ async def obter_conteudo_versao(
             detail="Material não encontrado"
         )
 
-    ext = "json" if material.tipo == TipoMaterial.MAPA_MENTAL else "html"
+    ext = "json" if material_conteudo.e_mapa_mental(material) else "html"
 
     if versao == (material.versao or 1):
-        # Versao atual = arquivo canonico
-        conteudo = storage_service.ler_json(material_id) if ext == "json" else storage_service.ler_html(material_id)
+        conteudo = material_conteudo.ler(material)
     else:
-        conteudo = storage_service.ler_versao(material_id, versao, ext)
+        conteudo = material_conteudo.ler_versao(material, versao)
 
     if conteudo is None:
         raise HTTPException(

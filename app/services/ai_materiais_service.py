@@ -33,6 +33,19 @@ logger = get_logger(__name__)
 # Tetos de seguranca (custo + tempo): os prompts pedem "4-6 quadrinhos" ou uma
 # colecao de figurinhas sem limite explicito, mas a IA pode devolver mais. Sem
 # teto, um album generoso multiplicaria chamadas pagas de imagem sem controle.
+# 2026-08-18 - PISO DE 4096 TOKENS POR MATERIAL
+# 18 tipos ainda pediam 2048/3072 tokens de saida para prompts que descrevem
+# listas inteiras (linha do tempo com 8 eventos, domino com 16 pecas,
+# sequenciamento com 8 etapas de 6 campos cada...). Quando a resposta batia no
+# teto, o JSON vinha cortado e o material inteiro falhava - desde 11/08 com
+# mensagem clara ("o conteudo pedido e longo demais"), mas ainda assim falhava.
+#
+# max_tokens e TETO, nao meta: subir o limite nao faz a IA escrever mais nem
+# muda o prompt (que continua pedindo "5-8 eventos"). So deixa de cortar o que
+# ela ja ia escrever. O custo sobe apenas nas respostas que de fato eram
+# maiores que o teto antigo - exatamente as que hoje se perdem por inteiro.
+#
+# Os tipos que ja tinham teto maior (6144/8192) nao foram tocados.
 MAX_IMAGENS_HQ = 6
 MAX_IMAGENS_ALBUM = 12
 _MAX_WORKERS_ILUSTRACAO = 3  # paralelo (I/O-bound); nao precisa ser o total de imagens
@@ -394,7 +407,7 @@ Conceito central + 4-6 ramos + sub-ramos.
 FORMATO JSON:
 {{"tema_central": "tema", "ramos": [{{"titulo": "Ramo", "cor": "azul", "subtopicos": ["sub1", "sub2"]}}]}}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 2048, cache_type="mapa_mental")
+        return self._chamar_ia(prompt, 4096, cache_type="mapa_mental")
     
     def gerar_linha_tempo(self, disciplina: str, serie: str, conteudo: str) -> Dict[str, Any]:
         """Gera Linha do Tempo - eventos em ordem cronológica"""
@@ -409,7 +422,7 @@ FORMATO JSON:
   "curiosidade": "Fato interessante"
 }}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 2048)
+        return self._chamar_ia(prompt, 4096, cache_type="linha_tempo")
     
     def gerar_hq_tirinha(self, disciplina: str, serie: str, conteudo: str) -> Dict[str, Any]:
         """Gera roteiro de HQ/Tirinha educativa"""
@@ -426,7 +439,7 @@ FORMATO JSON:
   "moral_historia": "O que aprendemos"
 }}
 Retorne APENAS o JSON."""
-        resultado = self._chamar_ia(prompt, 3072)
+        resultado = self._chamar_ia(prompt, 4096, cache_type="hq_tirinha")
         # 2026-08-15: cada quadrinho ganha uma ilustracao de verdade (Flux via
         # fal.ai) a partir de `cenario` — antes so o texto da cena existia.
         # "paisagem" porque quadrinho de HQ costuma ser mais largo que alto.
@@ -493,7 +506,7 @@ FORMATO JSON:
   "como_usar": "Instrução de uso"
 }}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 2048)
+        return self._chamar_ia(prompt, 4096, cache_type="arvore_decisao")
     
     # ==========================================
     # 🧠 MATERIAIS DE MEMORIZAÇÃO
@@ -506,7 +519,7 @@ Retorne APENAS o JSON."""
 FORMATO JSON:
 {{"cards": [{{"pergunta": "Pergunta", "resposta": "Resposta", "dica": "Dica opcional"}}]}}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 3072, cache_type="flashcards")
+        return self._chamar_ia(prompt, 4096, cache_type="flashcards")
     
     def gerar_jogo_memoria(self, disciplina: str, serie: str, conteudo: str) -> Dict[str, Any]:
         """Gera Jogo da Memória - pares de cartas"""
@@ -591,7 +604,7 @@ Retorne APENAS o JSON."""
 FORMATO JSON:
 {{"titulo": "Busca de Termos", "palavras": ["palavra1"], "matriz": [["A","B","C"]], "dicas": ["Dica para palavra1"]}}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 3072)
+        return self._chamar_ia(prompt, 4096, cache_type="caca_palavras")
     
     def gerar_cruzadinha(self, disciplina: str, serie: str, conteudo: str) -> Dict[str, Any]:
         """Gera palavras cruzadas educativas"""
@@ -620,7 +633,7 @@ FORMATO JSON:
   "chamadas": [{{"chamada": "Professor diz...", "resposta": "Aluno marca..."}}]
 }}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 3072)
+        return self._chamar_ia(prompt, 4096, cache_type="bingo_educativo")
     
     def gerar_domino(self, disciplina: str, serie: str, conteudo: str) -> Dict[str, Any]:
         """Gera dominó educativo"""
@@ -635,7 +648,7 @@ FORMATO JSON:
   "regra_conexao": "Como conectar"
 }}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 2048)
+        return self._chamar_ia(prompt, 4096, cache_type="domino")
     
     def gerar_quiz_interativo(self, disciplina: str, serie: str, conteudo: str) -> Dict[str, Any]:
         """Gera quiz interativo com feedback"""
@@ -658,7 +671,7 @@ FORMATO JSON:
   ]
 }}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 3072)
+        return self._chamar_ia(prompt, 4096, cache_type="quiz_interativo")
     
     def gerar_trilha_aprendizagem(self, disciplina: str, serie: str, conteudo: str) -> Dict[str, Any]:
         """Gera trilha/jogo de tabuleiro educativo"""
@@ -682,7 +695,7 @@ FORMATO JSON:
   "materiais_necessarios": ["dado", "peões"]
 }}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 3072)
+        return self._chamar_ia(prompt, 4096, cache_type="trilha_aprendizagem")
     
     def gerar_roleta_perguntas(self, disciplina: str, serie: str, conteudo: str) -> Dict[str, Any]:
         """Gera roleta de perguntas"""
@@ -764,7 +777,7 @@ FORMATO JSON:
   "proximo_passo": "O que fazer depois"
 }}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 2048)
+        return self._chamar_ia(prompt, 4096, cache_type="sequenciamento")
     
     def gerar_quadro_rotina(self, disciplina: str, serie: str, conteudo: str) -> Dict[str, Any]:
         """Gera Quadro de Rotina visual"""
@@ -794,7 +807,7 @@ FORMATO JSON:
   "dica_uso": "Colocar em local visível"
 }}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 2048)
+        return self._chamar_ia(prompt, 4096, cache_type="quadro_rotina")
     
     def gerar_cartoes_comunicacao(self, disciplina: str, serie: str, conteudo: str) -> Dict[str, Any]:
         """Gera Cartões de Comunicação Alternativa (CAA)"""
@@ -905,7 +918,7 @@ FORMATO JSON:
   "revisao": "Vamos revisar em: ___"
 }}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 2048)
+        return self._chamar_ia(prompt, 4096, cache_type="contrato_comportamento")
     
     def gerar_checklist_tarefas(self, disciplina: str, serie: str, conteudo: str) -> Dict[str, Any]:
         """Gera Checklist de Tarefas visual"""
@@ -960,7 +973,7 @@ FORMATO JSON:
   "dica_uso": "Como usar este painel"
 }}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 2048)
+        return self._chamar_ia(prompt, 4096, cache_type="painel_primeiro_depois")
     
     # ==========================================
     # ✍️ ATIVIDADES DE COMPLETAR
@@ -994,7 +1007,7 @@ FORMATO JSON:
   "gabarito": [{{"a": 1, "b": "A"}}]
 }}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 2048)
+        return self._chamar_ia(prompt, 4096, cache_type="ligue_colunas")
     
     def gerar_verdadeiro_falso(self, disciplina: str, serie: str, conteudo: str) -> Dict[str, Any]:
         """Gera atividade de Verdadeiro ou Falso"""
@@ -1008,7 +1021,7 @@ FORMATO JSON:
   "gabarito": ["1-V", "2-F"]
 }}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 2048)
+        return self._chamar_ia(prompt, 4096, cache_type="verdadeiro_falso")
     
     def gerar_ordenar_sequencia(self, disciplina: str, serie: str, conteudo: str) -> Dict[str, Any]:
         """Gera atividade de ordenar sequência"""
@@ -1074,7 +1087,7 @@ FORMATO JSON:
   "seguranca": "Cuidados"
 }}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 2048)
+        return self._chamar_ia(prompt, 4096, cache_type="experimento")
     
     def gerar_receita_procedimento(self, disciplina: str, serie: str, conteudo: str) -> Dict[str, Any]:
         """Gera formato receita/procedimento"""
@@ -1090,7 +1103,7 @@ FORMATO JSON:
   "resultado": "O que esperar"
 }}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 2048)
+        return self._chamar_ia(prompt, 4096, cache_type="receita_procedimento")
     
     def gerar_estudo_caso(self, disciplina: str, serie: str, conteudo: str) -> Dict[str, Any]:
         """Gera estudo de caso"""
@@ -1107,7 +1120,7 @@ FORMATO JSON:
   "conclusao": "O que aprender"
 }}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 2048)
+        return self._chamar_ia(prompt, 4096, cache_type="estudo_caso")
     
     def gerar_diario_bordo(self, disciplina: str, serie: str, conteudo: str) -> Dict[str, Any]:
         """Gera modelo de Diário de Bordo"""
@@ -1132,4 +1145,4 @@ FORMATO JSON:
   "reflexao_final": "Espaço para reflexão ao terminar o tema"
 }}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 2048)
+        return self._chamar_ia(prompt, 4096, cache_type="diario_bordo")

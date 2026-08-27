@@ -63,6 +63,11 @@ class F:
     PROVA_CORRECAO_PAPEL = "prova_correcao_papel"  # prova_folha_service (modo papel)
     REDACAO_PAPEL = "redacao_papel"                # redacao_folha_service (modo papel)
     ILUSTRACAO_IA = "ilustracao_ia"                # ilustracao_service (prompt de imagem)
+    EVOLUCAO_RASCUNHO = "evolucao_rascunho"        # evolucao_service (rascunho de nota clinica)
+    SESSAO_FOLHA_LEITURA = "sessao_folha_leitura"  # sessao_folha_service (modo papel clinico)
+    RELATORIO_EVOLUCAO_CLINICO = "relatorio_evolucao_clinico"  # relatorio_evolucao_service
+    PTI_RASCUNHO = "pti_rascunho"                  # pti_service (sugestao de metas)
+    HISTORIA_SOCIAL = "historia_social"            # historia_social_service (CAA)
 
     @classmethod
     def all(cls) -> list[str]:

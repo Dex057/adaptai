@@ -24,6 +24,18 @@ from app.models.redacao import TemaRedacao, RedacaoAluno  # REDAÇÕES ENEM
 
 # Importar rotas
 from app.api.routes import auth, students, questions, applications, analytics
+from app.api.routes import clinica  # VERTICAL CLINICA (Fase 0 + Modulo 1)
+from app.api.routes import clinica_sessao  # CLINICA - sessao/folha/evolucao IA
+from app.api.routes import modulos as modulos_tenant  # /tenant/modulos (gate de navegacao)
+from app.api.routes import familia  # Portal da Familia (publico, token)
+from app.api.routes import clinica_pranchas  # CLINICA - CAA/pranchas
+from app.api.routes import clinica_agenda  # CLINICA - agenda
+from app.api.routes import clinica_dashboard  # CLINICA - dashboard
+from app.api.routes import clinica_casa  # CLINICA - programa de casa
+from app.api.routes import clinica_mensagens  # CLINICA - mensagens familia
+from app.api.routes import clinica_comportamento  # CLINICA - comportamento ABC
+from app.api.routes import clinica_instrumentos  # CLINICA - instrumentos
+from app.api.routes import clinica_faturamento  # CLINICA - faturamento/convenios
 from app.api.routes import provas  # NOVA ROTA DE PROVAS
 from app.api.routes import student_provas  # ROTAS ESTUDANTES
 from app.api.routes import professor_analytics  # ANALYTICS DE PROVAS PARA PROFESSORES
@@ -396,6 +408,18 @@ app.include_router(checkout.router, prefix="/api/v1", tags=["🛒 Checkout"])
 app.include_router(admin_monitoring.router, prefix="/api/v1", tags=["⚙️ Admin Monitoring"])
 app.include_router(seduc.router, prefix="/api/v1", tags=["🗺️ Painel SEDUC"])
 app.include_router(ilustracoes.router, prefix="/api/v1", tags=["🎨 Ilustrações"])
+app.include_router(clinica.router, prefix="/api/v1", tags=["🏥 Clínica"])
+app.include_router(clinica_sessao.router, prefix="/api/v1", tags=["🏥 Clínica (Sessão)"])
+app.include_router(modulos_tenant.router, prefix="/api/v1", tags=["🔎 Módulos"])
+app.include_router(familia.router, prefix="/api/v1", tags=["🏥 Portal da Família"])
+app.include_router(clinica_pranchas.router, prefix="/api/v1", tags=["🏥 Clínica (CAA)"])
+app.include_router(clinica_agenda.router, prefix="/api/v1", tags=["🏥 Clínica (Agenda)"])
+app.include_router(clinica_dashboard.router, prefix="/api/v1", tags=["🏥 Clínica (Dashboard)"])
+app.include_router(clinica_casa.router, prefix="/api/v1", tags=["🏥 Clínica (Programa de casa)"])
+app.include_router(clinica_mensagens.router, prefix="/api/v1", tags=["🏥 Clínica (Mensagens)"])
+app.include_router(clinica_comportamento.router, prefix="/api/v1", tags=["🏥 Clínica (Comportamento)"])
+app.include_router(clinica_instrumentos.router, prefix="/api/v1", tags=["🏥 Clínica (Instrumentos)"])
+app.include_router(clinica_faturamento.router, prefix="/api/v1", tags=["🏥 Clínica (Faturamento)"])
 app.include_router(student_ilustracoes.router, prefix="/api/v1", tags=["🎨 Ilustrações (Aluno)"])
 app.include_router(comunicacao.router, prefix="/api/v1", tags=["💬 Comunicação"])
 app.include_router(plano_aula.router, prefix="/api/v1", tags=["📖 Plano de aula"])

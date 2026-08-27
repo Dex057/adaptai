@@ -139,12 +139,23 @@ def coletar(store, *, dias: int = 30, service: str | None = None,
                          FROM {ev} e JOIN {tg} t
                            ON t.event_id = e.event_id AND t.tag_key = 'request_path'
                          WHERE {W} GROUP BY t.tag_value ORDER BY custo DESC""")
+        # Geração de imagem não tokeniza (fal.ai etc.): input/output_tokens ficam
+        # 0 nesses eventos, então "quantidade" aqui é COUNT(*), não soma de
+        # tokens como nas outras seções. `operation` já existe no schema desde
+        # sempre - só ninguém tinha gravado nada além de 'chat' até agora.
+        imagens = q(f"""SELECT e.model AS k, COUNT(*) AS imagens,
+                        COALESCE(SUM(e.cost_usd),0) AS custo,
+                        SUM(CASE WHEN e.status <> 'ok' THEN 1 ELSE 0 END) AS falhas,
+                        COALESCE(SUM(e.priced),0) AS precificadas
+                        FROM {ev} e WHERE {W} AND e.operation = 'image_generation'
+                        GROUP BY e.model ORDER BY imagens DESC""")
     return {"dias": dias, "resumo": resumo, "por_dia": por_dia, "por_feature": por_feature,
             "por_modelo": por_modelo, "por_tenant": por_tenant, "cobertura": cobertura,
             "status": status, "sem_preco": sem_preco, "por_entidade": por_entidade,
             "servicos": servicos, "tag_tenant": tag_tenant,
             "tokens_feature": tokens_feature, "latencia": latencia,
-            "cache_modelo": cache_modelo, "erros": erros, "por_rota": por_rota}
+            "cache_modelo": cache_modelo, "erros": erros, "por_rota": por_rota,
+            "imagens": imagens}
 
 
 def _topn(linhas: list[dict], n: int = MAX_SERIES) -> tuple[list[str], dict]:
@@ -419,6 +430,9 @@ def _miolo(dados: dict, orcamento: float | None = None) -> str:
     fanout = (chamadas / execucoes) if execucoes else None
     cache = _economia_cache(dados["cache_modelo"])
 
+    total_imagens = sum(int(x["imagens"] or 0) for x in dados["imagens"])
+    custo_imagens = sum(_d(x["custo"]) for x in dados["imagens"])
+
     def tiles():
         t = [("Custo total", f"US$ {_fmt(custo, 2)}", _rotulo_periodo(dados["dias"])),
              ("Média diária", f"US$ {_fmt(media_dia, 2)}",
@@ -440,6 +454,10 @@ def _miolo(dados: dict, orcamento: float | None = None) -> str:
                    if cache["economia"] is not None else " · sem tabela de preço")
             t.append(("Cache de prompt", f"{cache['taxa']:.0f}%",
                       f"da entrada{eco}"))
+        if total_imagens:
+            det_img = (f"US$ {_fmt(custo_imagens, 4)}" if custo_imagens
+                       else "sem preço configurado")
+            t.append(("Imagens geradas", _int(total_imagens), det_img))
         if orcamento:
             pct = 100 * float(custo) / orcamento
             t.append(("Orçamento", f"{pct:.0f}%", f"de US$ {_fmt(Decimal(orcamento), 2)}"))
@@ -561,6 +579,24 @@ def _miolo(dados: dict, orcamento: float | None = None) -> str:
           entrada. Este custo está incluído no total acima, sem rótulo próprio.</p>
           {tabela_err}</section>"""
 
+    imagens_html = ""
+    if dados["imagens"]:
+        tabela_img = _tabela(
+            [{"modelo": x["k"], "imagens": _int(x["imagens"]),
+              "falhas": _int(x["falhas"]),
+              "custo": (f"US$ {_fmt(_d(x['custo']), 4)}"
+                        if int(x["precificadas"] or 0) else "sem preço")}
+             for x in dados["imagens"]],
+            [("modelo", "Modelo"), ("imagens", "Imagens geradas"),
+             ("falhas", "Falhas"), ("custo", "Custo")])
+        imagens_html = f"""<section class="card" style="margin-top:14px">
+          <h2>Imagens geradas</h2>
+          <p class="sub">Geração de imagem (ilustração por IA) não tokeniza —
+          é cobrada por unidade gerada, não por entrada/saída de texto. Uma
+          linha "sem preço" significa que a tarifa por chamada ainda não foi
+          confirmada em pricing.yaml, não que a imagem saiu de graça.</p>
+          {tabela_img}</section>"""
+
     return f"""<div class="tiles">{tiles()}</div>
 
 <section class="card"><h2>Custo acumulado por feature</h2>
@@ -604,6 +640,7 @@ def _miolo(dados: dict, orcamento: float | None = None) -> str:
 {_svg_barras(dados['por_tenant'], SERIES_VAR + [OUTROS_VAR], 'custo por tenant')}</section>
 
 {servicos_html}
+{imagens_html}
 {erros_html}
 
 <h2 style="margin-top:24px">Saúde da medição</h2>

@@ -87,10 +87,29 @@ async def listar_meus_materiais_adaptados(
     Retorna apenas metadados (sem `resultado_json`, que pode ser grande) - o
     conteudo completo vem no endpoint de detalhe.
     """
+    # 2026-08-18: o SELECT era da entidade inteira - trazia `resultado_json`
+    # (ate megabytes por linha, com as imagens base64 dos materiais
+    # ilustrados) so para montar uma lista de cards. Alem do trafego, o
+    # ORDER BY sobre linhas desse tamanho fazia o MySQL responder
+    # "1038 Out of sort memory" e o portal do aluno abria vazio. O docstring
+    # acima ja dizia "sem resultado_json" - agora o SQL cumpre.
     materiais = (
-        db.query(MaterialAdaptadoGerado)
+        db.query(
+            MaterialAdaptadoGerado.id,
+            MaterialAdaptadoGerado.disciplina,
+            MaterialAdaptadoGerado.serie,
+            MaterialAdaptadoGerado.conteudo,
+            MaterialAdaptadoGerado.tipos_material,
+            MaterialAdaptadoGerado.created_at,
+            MaterialAdaptadoGerado.favorito,
+            MaterialAdaptadoGerado.lido,
+            MaterialAdaptadoGerado.anotacoes_aluno,
+        )
         .filter(MaterialAdaptadoGerado.student_id == current_student.id)
-        .order_by(MaterialAdaptadoGerado.created_at.desc())
+        .order_by(
+            MaterialAdaptadoGerado.created_at.desc(),
+            MaterialAdaptadoGerado.id.desc(),
+        )
         .all()
     )
 

@@ -15,6 +15,9 @@ class TipoMaterialEnum(str, Enum):
     texto_simplificado = "texto_simplificado"
     roteiro_estudo = "roteiro_estudo"
     atividades = "atividades"
+    # 2026-08-17: atividade de geometria (figuras em SVG geradas pela IA).
+    # Espelha TipoMaterial.GEOMETRIA em app/models/material.py.
+    geometria = "geometria"
 
 
 class StatusMaterialEnum(str, Enum):
@@ -97,6 +100,11 @@ class MaterialAlunoResponse(BaseModel):
     
     class Config:
         from_attributes = True
+
+
+class AtribuirAlunosRequest(BaseModel):
+    """Atribui um material JA GERADO a alunos adicionais, sem gerar de novo."""
+    aluno_ids: List[int] = Field(..., min_items=1)
 
 
 class VisualizarMaterialRequest(BaseModel):

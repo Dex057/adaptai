@@ -11,7 +11,7 @@ Sem posse nova, sem escrita: o aluno nao cria nem remove ilustracao.
 from typing import Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, status, Request, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -27,7 +27,6 @@ from app.models.ilustracao import (
     FonteIlustracao,
 )
 from app.services.pictograma_service import url_pictograma
-from app.services import ilustracao_service
 
 logger = get_logger(__name__)
 
@@ -38,7 +37,6 @@ _CONTEXTOS = {
     "questao": ContextoIlustracao.QUESTAO,
     "redacao_tema": ContextoIlustracao.REDACAO_TEMA,
 }
-_EXT_MEDIA = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "webp": "image/webp"}
 
 
 def _mapear_contexto(contexto_tipo: str) -> ContextoIlustracao:
@@ -137,13 +135,7 @@ def servir_imagem_aluno(
         raise HTTPException(status_code=404, detail="Ilustracao nao encontrada.")
     _verificar_acesso_aluno(db, ilus.contexto_tipo, ilus.contexto_id, current_student)
 
-    if ilus.fonte != FonteIlustracao.IA or not ilus.imagem_path:
-        raise HTTPException(status_code=404, detail="Sem arquivo local para esta ilustracao.")
+    if ilus.fonte != FonteIlustracao.IA or not ilus.imagem_bytes:
+        raise HTTPException(status_code=404, detail="Imagem da ilustracao nao encontrada.")
 
-    caminho = ilustracao_service.caminho_storage() / ilus.imagem_path
-    if not caminho.exists():
-        raise HTTPException(status_code=404, detail="Arquivo da ilustracao nao encontrado.")
-
-    ext = ilus.imagem_path.rsplit(".", 1)[-1].lower()
-    media = _EXT_MEDIA.get(ext, "image/png")
-    return FileResponse(str(caminho), media_type=media)
+    return Response(content=bytes(ilus.imagem_bytes), media_type="image/png")

@@ -3,6 +3,7 @@ Rotas para Geração de Materiais Adaptados
 VERSÃO MEGA COMPLETA: 25+ tipos de materiais
 """
 from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from typing import Dict, Any, List, Optional
 from pydantic import BaseModel
@@ -11,6 +12,7 @@ import json
 
 from app.database import get_db
 from app.api.dependencies import get_current_active_user, verificar_acesso_aluno
+from app.core.logging_config import get_logger
 from app.core.rate_limit import check_rate_limit
 from app.core.pagination import PaginationParams, build_page
 from app.models.user import User
@@ -18,6 +20,7 @@ from app.models.student import Student
 from app.models.material_adaptado_gerado import MaterialAdaptadoGerado
 from app.services.ai_materiais_service import MaterialAdaptadoService
 
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/materiais-adaptados", tags=["Materiais Adaptados"])
 
@@ -52,17 +55,35 @@ TIPOS_HABILITADOS = {
     # mapa_mental: nao constava na lista de homologacao, mas tem viewer
     # dedicado e esta em uso em producao — bloquea-lo seria regressao.
     "mapa_mental",
+    # 2026-08-15 — geracao de imagem real (Flux/fal.ai) ligada em
+    # ai_materiais_service._ilustrar_itens + viewer dedicado no front
+    # (IlustradosViewers.jsx). Requer FAL_API_KEY; sem ela, degrada pro texto
+    # da descricao (nunca quebra, so nao ilustra).
+    "hq_tirinha",
     # 🧠 Memorizacao
     "flashcards", "jogo_memoria",
+    # 2026-08-15 — mesma liberacao de hq_tirinha (ilustracao real por figurinha).
+    "album_figurinhas",
     # 🎮 Jogos
     "caca_palavras", "quiz_interativo", "roleta_perguntas",
     # cruzadinha: mesma situacao do mapa_mental (viewer dedicado, em producao).
     "cruzadinha",
+    # 2026-08-14 — rodada 1 de liberacao: ganharam viewer dedicado no front
+    # (JogosTabuleiroViewers.jsx). Espelhar SEMPRE com TIPOS_HABILITADOS de
+    # adaptai-frontend/src/pages/materiaisAdaptados/config.js.
+    "arvore_decisao", "bingo", "domino", "trilha_aprendizagem",
     # 💙 TEA/TDAH
     "historia_social", "termometro_emocoes", "cartoes_comunicacao",
     "checklist_tarefas",
+    # 2026-08-14 — rodada 2 de liberacao (front: TeaTdahViewers.jsx).
+    # sequenciamento ja constava com viewer, mas o viewer lia campos errados
+    # (titulo/descricao em vez de acao/dica/checkpoint) — corrigido junto.
+    "quadro_rotina", "contrato_comportamento", "painel_primeiro_depois",
+    "sequenciamento",
     # ✍️ Completar
     "verdadeiro_falso", "complete_lacunas", "ordenar_sequencia",
+    # 2026-08-14 — rodada 2 (front: InterativosViewers.jsx).
+    "ligue_colunas",
     # 📝 Avaliacao (qualidade dos 3 formatos ainda em validacao pedagogica)
     "avaliacao",
     # 🔬 Praticos (categoria inteira; qualidade a validar)
@@ -125,6 +146,25 @@ TIPOS_MATERIAIS = {
     "estudo_caso": {"metodo": "gerar_estudo_caso", "nome": "Estudo de Caso", "categoria": "🔬 Práticos"},
     "diario_bordo": {"metodo": "gerar_diario_bordo", "nome": "Diário de Bordo", "categoria": "🔬 Práticos"},
 }
+
+
+def _remover_imagens_embutidas(payload: Any) -> int:
+    """
+    Tira todo `imagem_gerada` (data URI base64) de dentro do resultado.
+
+    Usado como plano B quando o INSERT do material completo falha por tamanho
+    — ver o except de POST /gerar. Devolve quantas imagens foram removidas.
+    """
+    removidas = 0
+    if isinstance(payload, dict):
+        if payload.pop("imagem_gerada", None):
+            removidas += 1
+        for valor in payload.values():
+            removidas += _remover_imagens_embutidas(valor)
+    elif isinstance(payload, list):
+        for item in payload:
+            removidas += _remover_imagens_embutidas(item)
+    return removidas
 
 
 @router.post("/gerar")
@@ -281,27 +321,99 @@ async def gerar_materiais_adaptados(
     response["tipos_solicitados"] = request_body.tipos_material
 
     # Salvar no banco
-    try:
-        material_salvo = MaterialAdaptadoGerado(
+    #
+    # 2026-08-17 — NAO ENGOLIR FALHA DE SAVE EM SILENCIO
+    # ------------------------------------------------------------------
+    # Antes, uma excecao aqui virava so um print() e a rota devolvia 200
+    # com o material inteiro no corpo mesmo sem persistir nada — o
+    # professor via "Material Gerado!" na hora (o front so olha o corpo
+    # da resposta, nunca confere material_id) e o material sumia na
+    # proxima visita ao historico. Suspeita forte: o proprio JSON com
+    # imagens embutidas em base64 (hq_tirinha/album_figurinhas, ate ~6,6MB
+    # — ver docs/dashcentral.md) estourando algum limite do MySQL no
+    # commit. Sem logar a excecao de verdade, essa causa nunca ficava
+    # visivel — daqui pra frente fica no log, e o front recebe 500 real
+    # em vez de sucesso fingido.
+    def _persistir(payload: Dict[str, Any]) -> MaterialAdaptadoGerado:
+        material = MaterialAdaptadoGerado(
             student_id=request_body.student_id,
             disciplina=request_body.disciplina,
             serie=serie,
             conteudo=request_body.conteudo,
-            tipos_material=response["materiais_gerados"],
-            resultado_json=response,
+            tipos_material=payload["materiais_gerados"],
+            resultado_json=payload,
             tempo_geracao=int(tempo_total),
             created_by=current_user.id
         )
-        db.add(material_salvo)
+        db.add(material)
         db.commit()
-        db.refresh(material_salvo)
+        db.refresh(material)
+        return material
+
+    try:
+        material_salvo = _persistir(response)
         response["material_id"] = material_salvo.id
-        print(f"[OK] Material salvo! ID: {material_salvo.id}")
+        return response
     except Exception as e:
-        print(f"[ERRO] Salvar material: {type(e).__name__}")
         db.rollback()
-    
-    return response
+        tamanho_kb = len(json.dumps(response, default=str)) // 1024
+        logger.exception(
+            "Falha ao salvar material adaptado (student_id=%s, tipos=%s, "
+            "resultado_json ~%d KB)",
+            request_body.student_id, response.get("materiais_gerados"), tamanho_kb,
+        )
+
+        # ------------------------------------------------------------------
+        # 2026-08-18 — SEGUNDA TENTATIVA SEM AS IMAGENS
+        # ------------------------------------------------------------------
+        # hq_tirinha e album_figurinhas embutem cada imagem como data URI
+        # base64 dentro do resultado_json (ate ~6,6MB no total). Esse e o
+        # unico payload do sistema grande o bastante para esbarrar em limite
+        # de servidor no INSERT (max_allowed_packet).
+        #
+        # Se o material completo nao coube, salvar SEM as imagens e melhor do
+        # que perder tudo: o front ja tem fallback para o texto da cena
+        # (`cenario` / `imagem_descricao`), entao o professor fica com um
+        # material utilizavel em vez de um 500 e credito de IA jogado fora.
+        # O aviso vai no proprio registro, para nao parecer que a ilustracao
+        # simplesmente nao foi pedida.
+        removidas = _remover_imagens_embutidas(response)
+        if removidas:
+            try:
+                response["aviso"] = (
+                    f"As {removidas} ilustrações geradas não couberam no "
+                    "armazenamento e não foram salvas. O restante do material "
+                    "está completo."
+                )
+                material_salvo = _persistir(response)
+                response["material_id"] = material_salvo.id
+                logger.warning(
+                    "Material adaptado salvo SEM %d ilustracao(oes) "
+                    "(student_id=%s): payload completo tinha ~%d KB",
+                    removidas, request_body.student_id, tamanho_kb,
+                )
+                return response
+            except Exception:
+                db.rollback()
+                logger.exception(
+                    "Falha ao salvar material adaptado tambem sem as imagens "
+                    "(student_id=%s)", request_body.student_id,
+                )
+
+        # A IA ja rodou e ja custou credito - por isso o erro e explicito
+        # (nao um 200 mentiroso) mas nao descarta silenciosamente: quem
+        # olhar o log tem tamanho do payload e tipo da excecao pra
+        # diagnosticar (ex.: estouro de max_allowed_packet do MySQL).
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": (
+                    "O material foi gerado mas não foi possível salvá-lo. "
+                    "Tente novamente - se persistir, avise o suporte."
+                ),
+                "erro_tipo": type(e).__name__,
+            },
+        )
 
 
 @router.get("/tipos-disponiveis")
@@ -346,6 +458,80 @@ async def listar_tipos_materiais(
     }
 
 
+@router.get("/historico/resumo")
+async def resumo_historico_por_aluno(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """
+    Quantos materiais adaptados cada aluno do professor tem, em UMA query.
+
+    2026-08-18 - por que este endpoint existe: a aba "Historico" do frontend
+    carregava a lista de alunos e disparava um
+    GET /historico/student/{id}?size=100 PARA CADA UM, em paralelo. Com 30
+    alunos era 30 requisicoes simultaneas, cada uma com COUNT + SELECT
+    paginado - so para descobrir quais alunos tem algum material. E o que
+    enchia o log do Railway de SQL e ajudava a derrubar o banco.
+
+    Aqui e um GROUP BY so. O front usa isto para montar a lista lateral e
+    busca os materiais apenas do aluno que o professor abrir.
+    """
+    # Import local: evita ciclo de import entre modulos de rota.
+    from app.api.routes.students import get_students_query
+
+    alunos = get_students_query(db, current_user).filter(
+        Student.is_active.isnot(False)
+    ).all()
+    ids = [a.id for a in alunos]
+    if not ids:
+        return {"items": [], "total_alunos": 0, "total_materiais": 0}
+
+    contagens = dict(
+        db.query(
+            MaterialAdaptadoGerado.student_id,
+            func.count(MaterialAdaptadoGerado.id),
+        )
+        .filter(MaterialAdaptadoGerado.student_id.in_(ids))
+        .group_by(MaterialAdaptadoGerado.student_id)
+        .all()
+    )
+
+    ultimos = dict(
+        db.query(
+            MaterialAdaptadoGerado.student_id,
+            func.max(MaterialAdaptadoGerado.created_at),
+        )
+        .filter(MaterialAdaptadoGerado.student_id.in_(ids))
+        .group_by(MaterialAdaptadoGerado.student_id)
+        .all()
+    )
+
+    items = []
+    for aluno in alunos:
+        total = contagens.get(aluno.id, 0)
+        if not total:
+            continue
+        ultimo = ultimos.get(aluno.id)
+        items.append({
+            "id": aluno.id,
+            "name": aluno.name,
+            "grade_level": aluno.grade_level,
+            "total_materiais": total,
+            # MySQL devolve datetime aqui; o SQLite dos testes devolve string.
+            "ultimo_material_em": (
+                ultimo.isoformat() if hasattr(ultimo, "isoformat") else ultimo
+            ),
+        })
+
+    items.sort(key=lambda i: (i["ultimo_material_em"] or ""), reverse=True)
+
+    return {
+        "items": items,
+        "total_alunos": len(items),
+        "total_materiais": sum(i["total_materiais"] for i in items),
+    }
+
+
 @router.get("/historico/student/{student_id}")
 async def listar_historico_student(
     student_id: int,
@@ -367,13 +553,50 @@ async def listar_historico_student(
     # SEGURANCA: verificar acesso ao aluno (evita IDOR entre escolas)
     student = verificar_acesso_aluno(db, student_id, current_user)
     
-    query = db.query(MaterialAdaptadoGerado)\
-        .filter(MaterialAdaptadoGerado.student_id == student_id)\
-        .order_by(MaterialAdaptadoGerado.created_at.desc())
-    
-    total = query.count()
-    materiais = query.offset(pagination.offset).limit(pagination.limit).all()
-    
+    # ------------------------------------------------------------------
+    # 2026-08-18 - SO AS COLUNAS QUE A LISTA USA
+    # ------------------------------------------------------------------
+    # Era `db.query(MaterialAdaptadoGerado)` (todas as colunas, inclusive
+    # `resultado_json`) com ORDER BY created_at. Com materiais ilustrados esse
+    # JSON chega a megabytes por linha e o MySQL respondia
+    # "1038 Out of sort memory" - a listagem inteira caia com 500 e o
+    # professor via "Nao foi possivel carregar os materiais".
+    #
+    # `resultado_json` ja e deferred no model; o SELECT explicito aqui deixa a
+    # intencao obvia e evita que a coluna volte por engano. `id` desempata a
+    # ordenacao: created_at tem precisao de segundo, e dois materiais gerados
+    # no mesmo segundo saiam em ordem instavel entre paginas.
+    colunas = (
+        MaterialAdaptadoGerado.id,
+        MaterialAdaptadoGerado.disciplina,
+        MaterialAdaptadoGerado.serie,
+        MaterialAdaptadoGerado.conteudo,
+        MaterialAdaptadoGerado.tipos_material,
+        MaterialAdaptadoGerado.tempo_geracao,
+        MaterialAdaptadoGerado.created_at,
+    )
+
+    # COUNT direto na tabela: `query.count()` do SQLAlchemy embrulha o SELECT
+    # inteiro numa subquery, fazendo o MySQL materializar as colunas de novo
+    # so para contar.
+    total = (
+        db.query(func.count(MaterialAdaptadoGerado.id))
+        .filter(MaterialAdaptadoGerado.student_id == student_id)
+        .scalar()
+    ) or 0
+
+    linhas_materiais = (
+        db.query(*colunas)
+        .filter(MaterialAdaptadoGerado.student_id == student_id)
+        .order_by(
+            MaterialAdaptadoGerado.created_at.desc(),
+            MaterialAdaptadoGerado.id.desc(),
+        )
+        .offset(pagination.offset)
+        .limit(pagination.limit)
+        .all()
+    )
+
     items = [
         {
             "id": m.id,
@@ -384,7 +607,7 @@ async def listar_historico_student(
             "tempo_geracao": m.tempo_geracao,
             "created_at": m.created_at.isoformat() if m.created_at else None
         }
-        for m in materiais
+        for m in linhas_materiais
     ]
     
     page = build_page(items=items, total=total, pagination=pagination)

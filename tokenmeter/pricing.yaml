@@ -5,6 +5,10 @@
 #  - specificity: maior vence quando dois padrões casam com o mesmo modelo.
 #  - effective_from / effective_to: vigência em UTC. 'to' vazio = vigente.
 #  - reviewed_at: alimenta o alerta de envelhecimento do `tokenmeter doctor`.
+#  - per_call_usd (opcional): preço por CHAMADA em vez de por token — para
+#    operações que não tokenizam (ex.: geração de imagem, cobrada por unidade
+#    gerada). Quando presente, input_per_mtok/output_per_mtok ainda são
+#    obrigatórios no schema mas devem ficar "0". Ver bloco `fal` abaixo.
 #
 # Override sem deploy: aponte TOKENMETER_PRICING para outro arquivo com este formato.
 
@@ -63,6 +67,29 @@ prices:
     output_per_mtok:      "5"
     cache_write_per_mtok: "1.25"
     cache_read_per_mtok:  "0.10"
+
+  # --- fal.ai (geração de imagem) -------------------------------------------
+  # Fonte: https://fal.ai/models/fal-ai/flux-2-pro (conferido em 17/08/2026).
+  # Tarifa real é US$ 0,03/megapixel em degraus de MP INTEIRO (não linear por
+  # pixel): a própria página exemplifica 1024x1024 = $0.03 flat (cabe no
+  # primeiro degrau) e 1920x1080 (~2.07MP) = $0.045 (primeiro + segundo MP).
+  #
+  # As 3 dimensões que o AdaptAI usa (image_providers.py:_DIMENSOES) cabem
+  # todas no primeiro degrau:
+  #   quadrado 1024x1024 (~1,05MP) · paisagem 1344x768 (~1,03MP) ·
+  #   retrato 768x1344 (~1,03MP)
+  # -> US$ 0,03 fixo nos três casos. Por isso per_call_usd flat é exato aqui,
+  # não uma aproximação — mas se _DIMENSOES ganhar um tamanho >2MP, essa
+  # tarifa fica errada e precisa virar cálculo por MP (o schema não suporta
+  # tiers hoje; ver pricing.py PriceBook.cost).
+  - provider: fal
+    model_pattern: "fal-ai/flux-2-pro*"
+    specificity: 20
+    effective_from: "2026-01-01T00:00:00"
+    effective_to:   null
+    input_per_mtok:  "0"
+    output_per_mtok: "0"
+    per_call_usd:    "0.03"
 
 # DELIBERADAMENTE SEM CURINGA "claude-*".
 #

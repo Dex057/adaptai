@@ -7,16 +7,48 @@ Usa cache de IA (services/ai_cache_service.py) para economizar creditos.
 """
 import json
 import hashlib
+import base64
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Any, List
 from app.core.anthropic_client import get_anthropic_client, get_default_model
 from app.services.ai_cache_service import lookup_cache, save_cache
 from app.core.logging_config import get_logger
+
+# 2026-08-15: hq_tirinha e album_figurinhas ligados ao pipeline de ilustracao
+# por IA (Flux via fal.ai) que ja existia para Material/Questao/TemaRedacao
+# mas nunca tinha sido conectado aqui — ver _ilustrar_itens mais abaixo.
+from app.services import ilustracao_service
+from app.services.image_providers import (
+    get_image_provider,
+    ProvedorImagemIndisponivel,
+    ErroGeracaoImagem,
+)
 
 # tokenmeter: atribuicao de consumo de IA (ver app/core/features.py)
 import tokenmeter as tm
 from app.core.features import F
 
 logger = get_logger(__name__)
+
+# Tetos de seguranca (custo + tempo): os prompts pedem "4-6 quadrinhos" ou uma
+# colecao de figurinhas sem limite explicito, mas a IA pode devolver mais. Sem
+# teto, um album generoso multiplicaria chamadas pagas de imagem sem controle.
+# 2026-08-18 - PISO DE 4096 TOKENS POR MATERIAL
+# 18 tipos ainda pediam 2048/3072 tokens de saida para prompts que descrevem
+# listas inteiras (linha do tempo com 8 eventos, domino com 16 pecas,
+# sequenciamento com 8 etapas de 6 campos cada...). Quando a resposta batia no
+# teto, o JSON vinha cortado e o material inteiro falhava - desde 11/08 com
+# mensagem clara ("o conteudo pedido e longo demais"), mas ainda assim falhava.
+#
+# max_tokens e TETO, nao meta: subir o limite nao faz a IA escrever mais nem
+# muda o prompt (que continua pedindo "5-8 eventos"). So deixa de cortar o que
+# ela ja ia escrever. O custo sobe apenas nas respostas que de fato eram
+# maiores que o teto antigo - exatamente as que hoje se perdem por inteiro.
+#
+# Os tipos que ja tinham teto maior (6144/8192) nao foram tocados.
+MAX_IMAGENS_HQ = 6
+MAX_IMAGENS_ALBUM = 12
+_MAX_WORKERS_ILUSTRACAO = 3  # paralelo (I/O-bound); nao precisa ser o total de imagens
 
 
 class MaterialAdaptadoService:
@@ -106,7 +138,111 @@ class MaterialAdaptadoService:
             pass
         
         return parsed
-    
+
+    # Formato/dimensao das imagens EMBUTIDAS (base64) no material adaptado.
+    # Separado das ilustracoes avulsas (Ilustracao.imagem_bytes), que podem ser
+    # grandes porque cada uma tem sua propria linha e sua propria rota.
+    _FORMATO_EMBUTIDO = "jpeg"
+
+    def _ilustrar_itens(
+        self,
+        itens: List[Dict[str, Any]],
+        campo_descricao: str,
+        tamanho: str = "quadrado_compacto",
+        limite: int = None,
+    ) -> Dict[str, Any]:
+        """Gera uma ilustracao IA (Flux via fal.ai) para cada item de uma lista,
+        em paralelo, e MUTA cada item adicionando `imagem_gerada` (data URI
+        base64 pronta para <img src>).
+
+        Usada por hq_tirinha (cada quadrinho) e album_figurinhas (cada
+        figurinha) — os unicos dois tipos cujo prompt descreve uma cena para
+        DESENHAR (`cenario`/`imagem_descricao`) em vez de so texto.
+
+        Decisoes de escopo:
+          - Sincrono, na mesma chamada de /materiais-adaptados/gerar — o
+            endpoint ja e sincrono e ja pode levar minutos gerando varios
+            tipos numa chamada so; isso so soma mais um tipo lento a lista.
+          - Paralelizado (ThreadPoolExecutor) porque cada chamada e I/O-bound
+            (rede) — gerar 6 imagens em serie multiplicaria o tempo por 6.
+          - Imagem embutida como data URI base64 DIRETO no item, sem tabela
+            nova nem rota de arquivo — reaproveita o `resultado_json` que ja
+            e o "cache" do material adaptado (MaterialAdaptadoGerado).
+            2026-08-17: esse embutido e justamente o que se suspeita ter
+            derrubado o salvamento do material (ver o comentario de
+            ab2378f em routes/materiais_adaptados.py — resultado_json chegando
+            a ~6,6MB). Enquanto o embutido continua (a alternativa e uma tabela
+            + rota novas), o PESO caiu por dois caminhos: dimensao COMPACTA
+            (512/768 em vez de 1024/1344) e JPEG em vez de PNG. Na pratica um
+            album de 12 figurinhas sai de ~6MB para menos de 1MB, com
+            diferenca visual imperceptivel no tamanho em que a imagem e
+            exibida (celula de grade / quadrinho).
+          - Falha por item (rede, provedor indisponivel, filtro de seguranca)
+            NAO derruba o material inteiro: o item so fica sem
+            `imagem_gerada`, e o front cai no texto (`cenario`/
+            `imagem_descricao`) como fallback.
+          - Sem FAL_API_KEY configurada: uma unica checagem de disponibilidade
+            antes do loop (nao N tentativas fadadas a falhar) — devolve so o
+            texto, mesmo comportamento de antes desta mudanca.
+          - `limite`: a IA pode devolver mais itens do que o prompt pede; sem
+            teto, um album generoso multiplicaria chamadas pagas sem controle
+            (ver MAX_IMAGENS_HQ / MAX_IMAGENS_ALBUM).
+
+        Devolve um DIAGNOSTICO (2026-08-17) que o chamador anexa ao material
+        como `ilustracoes_status`:
+
+            {"solicitadas": int, "geradas": int, "motivo": str|None}
+
+        POR QUE: ate aqui, "sem FAL_API_KEY" e "o provedor recusou" produziam
+        exatamente o mesmo resultado visivel — o material vinha so com texto,
+        sem nenhum aviso. O professor abria a HQ, via as molduras vazias e nao
+        tinha como saber se era falha, falta de configuracao ou se o recurso
+        simplesmente nao existia. Relatado como "nao consigo ver as imagens dos
+        materiais adaptados". A geracao continua degradando com elegancia (nunca
+        derruba o material); agora ela diz por que.
+        """
+        if not itens:
+            return {"solicitadas": 0, "geradas": 0, "motivo": None}
+
+        alvo = itens[:limite] if limite else itens
+        solicitadas = sum(1 for i in alvo if (i.get(campo_descricao) or "").strip())
+
+        try:
+            provedor = get_image_provider()
+        except ProvedorImagemIndisponivel:
+            return {"solicitadas": solicitadas, "geradas": 0, "motivo": "provedor_indisponivel"}
+        if not provedor.disponivel():
+            return {"solicitadas": solicitadas, "geradas": 0, "motivo": "sem_chave"}
+
+        def _gerar(item: Dict[str, Any]) -> None:
+            descricao = (item.get(campo_descricao) or "").strip()
+            if not descricao:
+                return
+            try:
+                prompt = ilustracao_service.gerar_prompt_ilustracao("material", descricao)
+                image_bytes = ilustracao_service.gerar_ilustracao_ia(
+                    prompt, tamanho=tamanho, formato=self._FORMATO_EMBUTIDO
+                )
+                item["imagem_gerada"] = (
+                    "data:image/%s;base64," % self._FORMATO_EMBUTIDO
+                    + base64.b64encode(image_bytes).decode("ascii")
+                )
+            except (ProvedorImagemIndisponivel, ErroGeracaoImagem) as e:
+                logger.warning("Falha ao ilustrar item ('%s...'): %s", descricao[:40], e)
+            except Exception:
+                logger.exception("Erro inesperado ao ilustrar item ('%s...')", descricao[:40])
+
+        with ThreadPoolExecutor(max_workers=_MAX_WORKERS_ILUSTRACAO) as executor:
+            list(executor.map(_gerar, alvo))
+
+        geradas = sum(1 for i in alvo if i.get("imagem_gerada"))
+        motivo = None
+        if geradas == 0 and solicitadas > 0:
+            motivo = "falha_geracao"
+        elif geradas < solicitadas:
+            motivo = "parcial"
+        return {"solicitadas": solicitadas, "geradas": geradas, "motivo": motivo}
+
     # ==========================================================================
     # ADAPTACAO POR PERFIL DO ALUNO — 2026-08-11
     # ==========================================================================
@@ -306,7 +442,7 @@ Conceito central + 4-6 ramos + sub-ramos.
 FORMATO JSON:
 {{"tema_central": "tema", "ramos": [{{"titulo": "Ramo", "cor": "azul", "subtopicos": ["sub1", "sub2"]}}]}}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 2048, cache_type="mapa_mental")
+        return self._chamar_ia(prompt, 4096, cache_type="mapa_mental")
     
     def gerar_linha_tempo(self, disciplina: str, serie: str, conteudo: str) -> Dict[str, Any]:
         """Gera Linha do Tempo - eventos em ordem cronológica"""
@@ -321,7 +457,7 @@ FORMATO JSON:
   "curiosidade": "Fato interessante"
 }}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 2048)
+        return self._chamar_ia(prompt, 4096, cache_type="linha_tempo")
     
     def gerar_hq_tirinha(self, disciplina: str, serie: str, conteudo: str) -> Dict[str, Any]:
         """Gera roteiro de HQ/Tirinha educativa"""
@@ -338,8 +474,18 @@ FORMATO JSON:
   "moral_historia": "O que aprendemos"
 }}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 3072)
-    
+        resultado = self._chamar_ia(prompt, 4096, cache_type="hq_tirinha")
+        # 2026-08-15: cada quadrinho ganha uma ilustracao de verdade (Flux via
+        # fal.ai) a partir de `cenario` — antes so o texto da cena existia.
+        # "paisagem" porque quadrinho de HQ costuma ser mais largo que alto.
+        resultado["ilustracoes_status"] = self._ilustrar_itens(
+            resultado.get("quadrinhos") or [],
+            campo_descricao="cenario",
+            tamanho="paisagem_compacta",
+            limite=MAX_IMAGENS_HQ,
+        )
+        return resultado
+
     def gerar_diagrama_venn(self, disciplina: str, serie: str, conteudo: str) -> Dict[str, Any]:
         """Gera Diagrama de Venn para comparações"""
         prompt = f"""Criar DIAGRAMA DE VENN sobre "{conteudo}" ({disciplina}, {serie}).
@@ -395,7 +541,7 @@ FORMATO JSON:
   "como_usar": "Instrução de uso"
 }}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 2048)
+        return self._chamar_ia(prompt, 4096, cache_type="arvore_decisao")
     
     # ==========================================
     # 🧠 MATERIAIS DE MEMORIZAÇÃO
@@ -408,7 +554,7 @@ Retorne APENAS o JSON."""
 FORMATO JSON:
 {{"cards": [{{"pergunta": "Pergunta", "resposta": "Resposta", "dica": "Dica opcional"}}]}}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 3072, cache_type="flashcards")
+        return self._chamar_ia(prompt, 4096, cache_type="flashcards")
     
     def gerar_jogo_memoria(self, disciplina: str, serie: str, conteudo: str) -> Dict[str, Any]:
         """Gera Jogo da Memória - pares de cartas"""
@@ -429,6 +575,7 @@ Retorne APENAS o JSON."""
         """Gera álbum de figurinhas educativo"""
         prompt = f"""Criar ÁLBUM DE FIGURINHAS sobre "{conteudo}" ({disciplina}, {serie}).
 Coleção de "figurinhas" com informações para colecionar.
+2-3 categorias, 4-6 figurinhas cada (máximo 12 figurinhas no total).
 
 FORMATO JSON:
 {{
@@ -453,8 +600,33 @@ FORMATO JSON:
   "desafio_completar": "Meta ao completar o álbum"
 }}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 3072)
-    
+        # 2026-08-15: 3072 tokens truncava. Diferente de hq_tirinha (4-6
+        # quadrinhos, cabe em 3072), o prompt do album nao tinha teto de
+        # categorias/figurinhas — a IA podia gerar um album generoso (varias
+        # categorias x varias figurinhas x 5 campos de texto cada) que
+        # estourava o limite, json.loads() quebrava (JSONDecodeError), e como
+        # o professor normalmente pede so este tipo, "nenhum material pode
+        # ser gerado" -> 422 pro album inteiro. Mesmo padrao de truncamento ja
+        # visto em ficha_leitura/resumo_estruturado/texto_niveis. Corrigido
+        # nos dois lados: teto explicito no prompt acima (bate com
+        # MAX_IMAGENS_ALBUM) + mais headroom aqui.
+        resultado = self._chamar_ia(prompt, 6144, cache_type="album_figurinhas")
+        # 2026-08-15: cada figurinha ganha uma ilustracao de verdade (Flux via
+        # fal.ai) a partir de `imagem_descricao` — antes so o texto existia.
+        # As figurinhas ficam aninhadas em categorias[]; achata pra aplicar o
+        # teto MAX_IMAGENS_ALBUM no total (nao por categoria) e ilustrar tudo
+        # numa unica leva paralela. _ilustrar_itens muta os dicts in-place,
+        # entao o efeito aparece direto dentro de `categorias` tambem.
+        categorias = resultado.get("categorias") or []
+        todas_figurinhas = [f for cat in categorias for f in (cat.get("figurinhas") or [])]
+        resultado["ilustracoes_status"] = self._ilustrar_itens(
+            todas_figurinhas,
+            campo_descricao="imagem_descricao",
+            tamanho="quadrado_compacto",
+            limite=MAX_IMAGENS_ALBUM,
+        )
+        return resultado
+
     # ==========================================
     # 🎮 JOGOS EDUCATIVOS
     # ==========================================
@@ -467,7 +639,7 @@ Retorne APENAS o JSON."""
 FORMATO JSON:
 {{"titulo": "Busca de Termos", "palavras": ["palavra1"], "matriz": [["A","B","C"]], "dicas": ["Dica para palavra1"]}}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 3072)
+        return self._chamar_ia(prompt, 4096, cache_type="caca_palavras")
     
     def gerar_cruzadinha(self, disciplina: str, serie: str, conteudo: str) -> Dict[str, Any]:
         """Gera palavras cruzadas educativas"""
@@ -496,7 +668,7 @@ FORMATO JSON:
   "chamadas": [{{"chamada": "Professor diz...", "resposta": "Aluno marca..."}}]
 }}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 3072)
+        return self._chamar_ia(prompt, 4096, cache_type="bingo_educativo")
     
     def gerar_domino(self, disciplina: str, serie: str, conteudo: str) -> Dict[str, Any]:
         """Gera dominó educativo"""
@@ -511,7 +683,7 @@ FORMATO JSON:
   "regra_conexao": "Como conectar"
 }}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 2048)
+        return self._chamar_ia(prompt, 4096, cache_type="domino")
     
     def gerar_quiz_interativo(self, disciplina: str, serie: str, conteudo: str) -> Dict[str, Any]:
         """Gera quiz interativo com feedback"""
@@ -534,7 +706,7 @@ FORMATO JSON:
   ]
 }}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 3072)
+        return self._chamar_ia(prompt, 4096, cache_type="quiz_interativo")
     
     def gerar_trilha_aprendizagem(self, disciplina: str, serie: str, conteudo: str) -> Dict[str, Any]:
         """Gera trilha/jogo de tabuleiro educativo"""
@@ -558,7 +730,7 @@ FORMATO JSON:
   "materiais_necessarios": ["dado", "peões"]
 }}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 3072)
+        return self._chamar_ia(prompt, 4096, cache_type="trilha_aprendizagem")
     
     def gerar_roleta_perguntas(self, disciplina: str, serie: str, conteudo: str) -> Dict[str, Any]:
         """Gera roleta de perguntas"""
@@ -640,7 +812,7 @@ FORMATO JSON:
   "proximo_passo": "O que fazer depois"
 }}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 2048)
+        return self._chamar_ia(prompt, 4096, cache_type="sequenciamento")
     
     def gerar_quadro_rotina(self, disciplina: str, serie: str, conteudo: str) -> Dict[str, Any]:
         """Gera Quadro de Rotina visual"""
@@ -670,7 +842,7 @@ FORMATO JSON:
   "dica_uso": "Colocar em local visível"
 }}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 2048)
+        return self._chamar_ia(prompt, 4096, cache_type="quadro_rotina")
     
     def gerar_cartoes_comunicacao(self, disciplina: str, serie: str, conteudo: str) -> Dict[str, Any]:
         """Gera Cartões de Comunicação Alternativa (CAA)"""
@@ -781,7 +953,7 @@ FORMATO JSON:
   "revisao": "Vamos revisar em: ___"
 }}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 2048)
+        return self._chamar_ia(prompt, 4096, cache_type="contrato_comportamento")
     
     def gerar_checklist_tarefas(self, disciplina: str, serie: str, conteudo: str) -> Dict[str, Any]:
         """Gera Checklist de Tarefas visual"""
@@ -836,7 +1008,7 @@ FORMATO JSON:
   "dica_uso": "Como usar este painel"
 }}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 2048)
+        return self._chamar_ia(prompt, 4096, cache_type="painel_primeiro_depois")
     
     # ==========================================
     # ✍️ ATIVIDADES DE COMPLETAR
@@ -870,7 +1042,7 @@ FORMATO JSON:
   "gabarito": [{{"a": 1, "b": "A"}}]
 }}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 2048)
+        return self._chamar_ia(prompt, 4096, cache_type="ligue_colunas")
     
     def gerar_verdadeiro_falso(self, disciplina: str, serie: str, conteudo: str) -> Dict[str, Any]:
         """Gera atividade de Verdadeiro ou Falso"""
@@ -884,7 +1056,7 @@ FORMATO JSON:
   "gabarito": ["1-V", "2-F"]
 }}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 2048)
+        return self._chamar_ia(prompt, 4096, cache_type="verdadeiro_falso")
     
     def gerar_ordenar_sequencia(self, disciplina: str, serie: str, conteudo: str) -> Dict[str, Any]:
         """Gera atividade de ordenar sequência"""
@@ -950,7 +1122,7 @@ FORMATO JSON:
   "seguranca": "Cuidados"
 }}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 2048)
+        return self._chamar_ia(prompt, 4096, cache_type="experimento")
     
     def gerar_receita_procedimento(self, disciplina: str, serie: str, conteudo: str) -> Dict[str, Any]:
         """Gera formato receita/procedimento"""
@@ -966,7 +1138,7 @@ FORMATO JSON:
   "resultado": "O que esperar"
 }}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 2048)
+        return self._chamar_ia(prompt, 4096, cache_type="receita_procedimento")
     
     def gerar_estudo_caso(self, disciplina: str, serie: str, conteudo: str) -> Dict[str, Any]:
         """Gera estudo de caso"""
@@ -983,7 +1155,7 @@ FORMATO JSON:
   "conclusao": "O que aprender"
 }}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 2048)
+        return self._chamar_ia(prompt, 4096, cache_type="estudo_caso")
     
     def gerar_diario_bordo(self, disciplina: str, serie: str, conteudo: str) -> Dict[str, Any]:
         """Gera modelo de Diário de Bordo"""
@@ -1008,4 +1180,4 @@ FORMATO JSON:
   "reflexao_final": "Espaço para reflexão ao terminar o tema"
 }}
 Retorne APENAS o JSON."""
-        return self._chamar_ia(prompt, 2048)
+        return self._chamar_ia(prompt, 4096, cache_type="diario_bordo")

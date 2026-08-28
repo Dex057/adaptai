@@ -168,7 +168,6 @@ Gere a prova de reforço agora:
             message = self.client.messages.create(
                 model=self.model,
                 max_tokens=4000,
-                temperature=0.7,
                 messages=[
                     {"role": "user", "content": prompt}
                 ]

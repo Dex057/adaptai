@@ -61,7 +61,6 @@ class GeradorProvasService:
             response = self.client.messages.create(
                 model=self.model,
                 max_tokens=8000,
-                temperature=0.7,
                 messages=[
                     {
                         "role": "user",

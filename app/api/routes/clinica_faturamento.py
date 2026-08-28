@@ -25,7 +25,7 @@ from app.services import acesso_clinico
 from app.models.clinica_faturamento import (
     Convenio, Faturamento, TipoConvenio, StatusFaturamento, PrecoEspecialidade,
 )
-from app.models.clinica_core import Especialidade
+from app.models.clinica_core import Especialidade, Paciente
 
 router = APIRouter(
     prefix="/clinica",
@@ -232,6 +232,32 @@ def mudar_status_faturamento(
 # ============================================================================
 # Resumo por competencia (agrega o tenant inteiro)
 # ============================================================================
+@router.get("/faturamento/itens")
+def listar_itens_mes(
+    competencia: str = Query(..., description="mes 'YYYY-MM'"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Lista os itens de faturamento do tenant na competencia (com nome do paciente)."""
+    if not _competencia_valida(competencia):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "competencia deve ser 'YYYY-MM'")
+    is_super = current_user.role == UserRole.SUPER_ADMIN
+    escola_id = current_user.escola_id
+    q = (db.query(Faturamento, Paciente.nome)
+         .outerjoin(Paciente, Paciente.id == Faturamento.paciente_id)
+         .filter(Faturamento.competencia == competencia))
+    if not is_super:
+        q = q.filter(Faturamento.escola_id == escola_id)
+    itens = q.order_by(Faturamento.id.desc()).limit(500).all()
+    return [{
+        "id": f.id, "paciente_id": f.paciente_id, "paciente_nome": nome,
+        "valor": _num(f.valor),
+        "status": f.status.value if hasattr(f.status, "value") else f.status,
+        "convenio_id": f.convenio_id, "observacao": f.observacao,
+        "sessao_id": f.sessao_id, "competencia": f.competencia,
+    } for f, nome in itens]
+
+
 @router.get("/faturamento/resumo")
 def resumo_faturamento(
     competencia: str = Query(..., description="mes 'YYYY-MM'"),

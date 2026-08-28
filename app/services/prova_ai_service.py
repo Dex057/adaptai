@@ -89,7 +89,6 @@ class ProvaAIService:
                 message = self.client.messages.create(
                     model=self.model,
                     max_tokens=max_tokens,
-                    temperature=0.7,
                     timeout=self.timeout_seconds,
                     messages=[{"role": "user", "content": prompt}],
                 )
@@ -375,7 +374,6 @@ Gere a análise agora:"""
             message = self.client.messages.create(
                 model=self.model,
                 max_tokens=4000,
-                temperature=0.5,
                 timeout=self.timeout_seconds,
                 messages=[{
                     "role": "user",
@@ -446,7 +444,6 @@ Escreva o feedback (máximo 300 palavras):"""
             message = self.client.messages.create(
                 model=self.model,
                 max_tokens=1500,
-                temperature=0.8,
                 timeout=self.timeout_seconds,
                 messages=[{
                     "role": "user",

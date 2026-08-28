@@ -135,7 +135,6 @@ IMPORTANTE:
             response = self.client.messages.create(
                 model=self.model,
                 max_tokens=4096,
-                temperature=0.7,
                 messages=[
                     {
                         "role": "user",
@@ -241,7 +240,6 @@ Responda APENAS com JSON válido no seguinte formato:
             response = self.client.messages.create(
                 model=self.model,
                 max_tokens=2048,
-                temperature=0.7,
                 messages=[
                     {
                         "role": "user",

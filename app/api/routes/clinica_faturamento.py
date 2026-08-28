@@ -23,8 +23,9 @@ from app.models.user import User, UserRole
 from app.core.entitlements import requer_modulo, Modulo
 from app.services import acesso_clinico
 from app.models.clinica_faturamento import (
-    Convenio, Faturamento, TipoConvenio, StatusFaturamento,
+    Convenio, Faturamento, TipoConvenio, StatusFaturamento, PrecoEspecialidade,
 )
+from app.models.clinica_core import Especialidade
 
 router = APIRouter(
     prefix="/clinica",
@@ -269,3 +270,48 @@ def resumo_faturamento(
         "a_receber": round(a_receber, 2),
         "por_status": por_status,
     }
+
+
+# ============================================================================
+# Precos por especialidade (base do faturamento por sessao)
+# ============================================================================
+class PrecoSet(BaseModel):
+    valor: float = Field(..., ge=0)
+
+
+@router.get("/precos")
+def listar_precos(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Lista TODAS as especialidades com o valor configurado (0 se nao definido)."""
+    escola_id = _escola_id(current_user)
+    rows = {p.especialidade: p.valor for p in db.query(PrecoEspecialidade)
+            .filter(PrecoEspecialidade.escola_id == escola_id).all()}
+    return [
+        {"especialidade": e.value, "valor": _num(rows.get(e, 0))}
+        for e in Especialidade
+    ]
+
+
+@router.put("/precos/{especialidade}")
+def definir_preco(
+    especialidade: Especialidade,
+    body: PrecoSet,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    escola_id = _escola_id(current_user)
+    try:
+        valor = Decimal(str(body.valor)).quantize(Decimal("0.01"))
+    except (InvalidOperation, ValueError):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "valor invalido")
+    row = (db.query(PrecoEspecialidade)
+           .filter(PrecoEspecialidade.escola_id == escola_id,
+                   PrecoEspecialidade.especialidade == especialidade).first())
+    if row:
+        row.valor = valor
+    else:
+        db.add(PrecoEspecialidade(escola_id=escola_id, especialidade=especialidade, valor=valor))
+    db.commit()
+    return {"especialidade": especialidade.value, "valor": float(valor)}

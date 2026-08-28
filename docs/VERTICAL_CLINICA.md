@@ -278,3 +278,23 @@ Frontend:
 - Teste: `test_clinica_models.py` inclui `convenios` e `faturamentos` no metadata esperado.
 
 Ordem de migrations do vertical passa a ser 011→020.
+
+## Faturamento por sessão (migration 021)
+
+Preço padrão por especialidade (por tenant) + geração automática do item de
+faturamento ao confirmar a folha de sessão.
+
+- Migration `021_clinica_precos.sql`: tabela `precos_especialidade`
+  (escola_id, especialidade, valor; único por escola+especialidade).
+- Model `PrecoEspecialidade` (registrado no `__init__`).
+- Serviço `faturamento_service.faturar_sessao(db, sessao, criado_por_id)`:
+  cria um `Faturamento` para a sessão (dedup por `sessao_id`), competência =
+  mês da sessão, valor = preço da especialidade (0 se não configurado),
+  status A_FATURAR. Chamado por `confirmar_folha` em modo best-effort
+  (nunca derruba a confirmação da folha).
+- Rotas: `GET /clinica/precos` (todas as especialidades com valor, 0 default) e
+  `PUT /clinica/precos/{especialidade}`.
+- Frontend: seção "Preços por especialidade" em `ClinicaFaturamento.jsx`
+  (edita e salva no blur). Serviços `listarPrecos`/`definirPreco`.
+- Os itens gerados por sessão entram no resumo mensal e na lista do paciente.
+- Migrations do vertical: 011→021 (aplicadas automaticamente no deploy).

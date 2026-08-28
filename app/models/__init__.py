@@ -283,6 +283,6 @@ __all__ += ["AplicacaoInstrumento"]
 
 # Clinica - Faturamento/convenios
 from app.models.clinica_faturamento import (
-    Convenio, Faturamento, TipoConvenio, StatusFaturamento,
+    Convenio, Faturamento, TipoConvenio, StatusFaturamento, PrecoEspecialidade,
 )
-__all__ += ["Convenio", "Faturamento", "TipoConvenio", "StatusFaturamento"]
+__all__ += ["Convenio", "Faturamento", "TipoConvenio", "StatusFaturamento", "PrecoEspecialidade"]

@@ -13,7 +13,7 @@ TABELAS_CLINICAS = {
     "planos_terapeuticos", "objetivos_terapeuticos", "sessoes",
     "registros_tentativa", "evolucoes", "pranchas", "prancha_itens",
     "agendamentos", "tarefas_casa", "tarefa_casa_check", "mensagens_familia",
-    "convenios", "faturamentos",
+    "convenios", "faturamentos", "precos_especialidade",
 }
 
 

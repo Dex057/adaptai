@@ -15,6 +15,7 @@ from sqlalchemy import (
 from datetime import datetime, timezone
 import enum
 from app.database import Base
+from app.models.clinica_core import Especialidade
 
 
 def _agora():
@@ -62,3 +63,15 @@ class Faturamento(Base):
     observacao = Column(String(255), nullable=True)
     criado_por_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     criado_em = Column(DateTime, default=_agora)
+
+
+class PrecoEspecialidade(Base):
+    """Preco padrao por especialidade (por tenant). Base do faturamento por sessao."""
+    __tablename__ = "precos_especialidade"
+
+    id = Column(Integer, primary_key=True, index=True)
+    escola_id = Column(Integer, ForeignKey("escolas.id", ondelete="CASCADE"), nullable=False, index=True)
+    especialidade = Column(SQLEnum(Especialidade), nullable=False)
+    valor = Column(DECIMAL(10, 2), nullable=False, default=0)
+    criado_em = Column(DateTime, default=_agora)
+    atualizado_em = Column(DateTime, default=_agora, onupdate=_agora)

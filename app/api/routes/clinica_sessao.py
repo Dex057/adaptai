@@ -24,6 +24,7 @@ from app.models.user import User
 from app.core.entitlements import requer_modulo, Modulo
 from app.services import acesso_clinico
 from app.services import evolucao_service, sessao_folha_service
+from app.services import faturamento_service
 from app.models.clinica_terapia import (
     PlanoTerapeutico, ObjetivoTerapeutico, Sessao, RegistroTentativa, Evolucao,
     StatusObjetivoTerapeutico, NivelAjuda,
@@ -320,4 +321,12 @@ def confirmar_folha(
     # recalcula mastery dos objetivos afetados (conservador; profissional ajusta)
     for oid in set(criados):
         _recalcular_status_objetivo(db, oid)
-    return {"sessao_id": sessao.id, "registros_criados": len(criados)}
+    # faturamento automatico da sessao (best-effort: nunca derruba a confirmacao)
+    faturamento_id = None
+    try:
+        fat = faturamento_service.faturar_sessao(db, sessao, current_user.id)
+        faturamento_id = fat.id if fat else None
+    except Exception:  # noqa: BLE001
+        faturamento_id = None
+    return {"sessao_id": sessao.id, "registros_criados": len(criados),
+            "faturamento_id": faturamento_id}

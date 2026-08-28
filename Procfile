@@ -13,4 +13,4 @@
 #   2. Setar REDIS_URL na env var do app
 #   3. Trocar "--workers 1" por "--workers 2" (ou 4, dependendo da CPU)
 #   4. Verificar em /health que rate_limit_backend == "redis"
-web: python -m uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1
+web: python run_migrations.py && python -m uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1

@@ -298,3 +298,16 @@ faturamento ao confirmar a folha de sessão.
   (edita e salva no blur). Serviços `listarPrecos`/`definirPreco`.
 - Os itens gerados por sessão entram no resumo mensal e na lista do paciente.
 - Migrations do vertical: 011→021 (aplicadas automaticamente no deploy).
+
+## Folha de sessão preenchida (PDF)
+
+Documento imprimível com os dados registrados de uma sessão.
+
+- Endpoint `GET /clinica/sessoes/{id}/completa`: retorna registros de tentativa
+  (objetivo, tentativas/acertos, % independência, nível de ajuda), observação e
+  a evolução da sessão (se houver). Minimização: não retorna nome do paciente.
+- Frontend: página `ClinicaFolhaSessaoImpressao.jsx` (rota
+  `clinica/sessao/:sessaoId/folha-preenchida`, FORA do Layout), com identificação
+  editável + tabela de registros + evolução + assinatura; `window.print()` para
+  papel ou "Salvar como PDF". Botão "PDF" na lista de sessões do paciente.
+- Sem migration nova.

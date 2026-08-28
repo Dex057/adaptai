@@ -224,6 +224,56 @@ def serie_evolucao_objetivo(
 # ============================================================================
 # Modo Papel clinico — folha de sessao
 # ============================================================================
+@router.get("/sessoes/{sessao_id}/completa")
+def sessao_completa(
+    sessao_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Dados registrados da sessao (para a folha preenchida / PDF): registros de
+    tentativa por objetivo + evolucao assinada, se houver. Minimizacao: nao
+    retorna nome do paciente (o profissional preenche na impressao)."""
+    sessao = _sessao_com_acesso(db, sessao_id, current_user)
+    regs = (
+        db.query(RegistroTentativa, ObjetivoTerapeutico)
+        .join(ObjetivoTerapeutico, ObjetivoTerapeutico.id == RegistroTentativa.objetivo_id)
+        .filter(RegistroTentativa.sessao_id == sessao.id)
+        .order_by(ObjetivoTerapeutico.ordem, ObjetivoTerapeutico.id)
+        .all()
+    )
+    ev = (
+        db.query(Evolucao)
+        .filter(Evolucao.sessao_id == sessao.id)
+        .order_by(Evolucao.id.desc())
+        .first()
+    )
+    def _num(v):
+        return float(v) if v is not None else None
+    return {
+        "sessao_id": sessao.id,
+        "data_sessao": str(sessao.data_sessao) if sessao.data_sessao else None,
+        "especialidade": _v(sessao.especialidade),
+        "presenca": _v(sessao.presenca),
+        "observacao": sessao.observacao,
+        "registros": [
+            {
+                "objetivo": obj.descricao,
+                "especialidade": _v(obj.especialidade),
+                "tentativas": reg.tentativas,
+                "acertos": reg.acertos,
+                "percentual_independencia": _num(reg.percentual_independencia),
+                "nivel_ajuda": _v(reg.nivel_ajuda),
+            }
+            for reg, obj in regs
+        ],
+        "evolucao": (
+            {"texto": ev.texto, "assinada": ev.assinado_em is not None,
+             "assinado_em": str(ev.assinado_em) if ev.assinado_em else None}
+            if ev else None
+        ),
+    }
+
+
 @router.get("/sessoes/{sessao_id}/folha-impressao")
 def folha_impressao(
     sessao_id: int,

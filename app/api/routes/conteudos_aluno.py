@@ -167,7 +167,7 @@ async def sugestoes_para_prova(
                 "conteudo": aula.conteudo,
                 "data": aula.registro.data_aula.isoformat(),
                 "paginas": aula.paginas,
-                "relevancia": "alta" if aula.tem_avaliacao else "normal"
+                "relevancia": "alta" if aula.tem_atividade_avaliativa else "normal"
             })
     
     # Gerar texto sugerido para o campo de conteúdo da prova
@@ -250,7 +250,7 @@ async def sugestoes_para_material(
                 "data": a.registro.data_aula.isoformat(),
                 "tem_dever": a.tem_dever_casa,
                 "tem_avaliacao": a.tem_atividade_avaliativa,
-                "prioridade": "alta" if a.tem_avaliacao else ("media" if a.tem_dever_casa else "normal")
+                "prioridade": "alta" if a.tem_atividade_avaliativa else ("media" if a.tem_dever_casa else "normal")
             }
             for a in aulas
         ],

@@ -2,15 +2,55 @@
 🎓 AdaptAI - Schemas de Prova
 Schemas Pydantic para validação de dados
 """
-from pydantic import BaseModel, Field, ConfigDict
+import json
+
+from pydantic import BaseModel, Field, ConfigDict, BeforeValidator
 from datetime import datetime
-from typing import Optional, List, Dict, Any
+from typing import Annotated, Optional, List, Dict, Any
 from app.models.prova import (
     StatusProva, 
     StatusProvaAluno, 
     DificuldadeQuestao, 
     TipoQuestao
 )
+
+
+# ----------------------------------------------------------------------
+# CORRECAO 2026-08-31 — 500 "Input should be a valid list" em prova gerada
+# ----------------------------------------------------------------------
+# Terceira reincidencia do mesmo defeito (ver os comentarios de 2026-08-11 em
+# QuestaoGeradaResponse e QuestaoParaAluno): a IA devolve num campo de lista um
+# texto corrido, provas.py grava o valor cru numa Column(JSON) — que aceita
+# qualquer coisa — e o erro so aparece quando o FastAPI serializa a resposta,
+# DEPOIS do db.commit() e FORA do try/except da rota. A prova fica gravada e
+# ilegivel: /gerar, GET /{id} e PATCH /{id} devolvem 500 para sempre.
+#
+# Normalizar no schema conserta os dois lados de uma vez: as linhas ja gravadas
+# tortas voltam a ser lidas, e uma lista continua passando intacta.
+def _como_lista(valor):
+    """Aceita o que a IA manda num campo de lista e devolve List[str].
+
+    Lista e None passam intactos. Texto corrido vira `[texto]` — NUNCA `[]`,
+    senao o criterio de correcao que o professor precisa some em silencio.
+    """
+    if valor is None or isinstance(valor, list):
+        return valor
+    if isinstance(valor, str):
+        texto = valor.strip()
+        if not texto:
+            return None
+        if texto.startswith("["):
+            try:
+                parsed = json.loads(texto)
+                if isinstance(parsed, list):
+                    return parsed
+            except json.JSONDecodeError:
+                pass
+        return [texto]
+    return valor
+
+
+ListaTexto = Annotated[Optional[List[str]], BeforeValidator(_como_lista)]
 
 
 # ============= SCHEMAS DE CRIAÇÃO =============
@@ -36,14 +76,14 @@ class QuestaoGeradaCreate(BaseModel):
     enunciado: str = Field(..., min_length=10, description="Enunciado da questão")
     tipo: TipoQuestao = Field(..., description="Tipo da questão")
     dificuldade: Optional[DificuldadeQuestao] = Field(None, description="Dificuldade")
-    opcoes: Optional[List[str]] = Field(None, description="Opções de resposta")
+    opcoes: ListaTexto = Field(None, description="Opções de resposta")
     # 2026-08-11: obrigatorio impedia criar questao DISSERTATIVA por este
     # schema — ela nao tem resposta unica, e sim `criterios_avaliacao`.
     resposta_correta: Optional[str] = Field(None, description="Resposta correta (nulo em dissertativa)")
-    criterios_avaliacao: Optional[List[str]] = Field(None, description="Critérios de avaliação")
+    criterios_avaliacao: ListaTexto = Field(None, description="Critérios de avaliação")
     pontuacao: float = Field(0.5, ge=0, description="Pontos da questão")
     explicacao: Optional[str] = Field(None, description="Explicação da resposta")
-    tags: Optional[List[str]] = Field(None, description="Tags/tópicos")
+    tags: ListaTexto = Field(None, description="Tags/tópicos")
 
 
 class ProvaAlunoCreate(BaseModel):
@@ -69,7 +109,7 @@ class QuestaoGeradaResponse(BaseModel):
     enunciado: str
     tipo: TipoQuestao
     dificuldade: Optional[DificuldadeQuestao] = None
-    opcoes: Optional[List[str]] = None
+    opcoes: ListaTexto = None
     # ------------------------------------------------------------------
     # CORRECAO 2026-08-11 — 500 "Internal Server Error" em prova dissertativa
     # ------------------------------------------------------------------
@@ -87,10 +127,10 @@ class QuestaoGeradaResponse(BaseModel):
     # Efeito colateral: cada tentativa deixava uma prova ORFA no banco, criada
     # com sucesso mas invisivel para o professor, que via apenas o erro.
     resposta_correta: Optional[str] = None
-    criterios_avaliacao: Optional[List[str]] = None
+    criterios_avaliacao: ListaTexto = None
     pontuacao: float
     explicacao: Optional[str] = None
-    tags: Optional[List[str]] = None
+    tags: ListaTexto = None
     criado_em: datetime
 
     model_config = ConfigDict(from_attributes=True)
@@ -106,7 +146,7 @@ class QuestaoParaAluno(BaseModel):
     numero: Optional[int] = None
     enunciado: str
     tipo: TipoQuestao
-    opcoes: Optional[List[str]] = None
+    opcoes: ListaTexto = None
     pontuacao: float
 
     model_config = ConfigDict(from_attributes=True)

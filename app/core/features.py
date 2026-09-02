@@ -68,6 +68,7 @@ class F:
     RELATORIO_EVOLUCAO_CLINICO = "relatorio_evolucao_clinico"  # relatorio_evolucao_service
     PTI_RASCUNHO = "pti_rascunho"                  # pti_service (sugestao de metas)
     HISTORIA_SOCIAL = "historia_social"            # historia_social_service (CAA)
+    CLINICA_COPILOTO = "clinica_copiloto"          # copiloto_service (proxima acao no PTI)
 
     @classmethod
     def all(cls) -> list[str]:

@@ -24,6 +24,7 @@ from app.models.user import User
 from app.core.entitlements import requer_modulo, Modulo
 from app.services import acesso_clinico
 from app.services import evolucao_service, sessao_folha_service
+from app.services import copiloto_service
 from app.services import faturamento_service
 from app.models.clinica_terapia import (
     PlanoTerapeutico, ObjetivoTerapeutico, Sessao, RegistroTentativa, Evolucao,
@@ -219,6 +220,57 @@ def serie_evolucao_objetivo(
         "linha_base": float(obj.linha_base) if obj.linha_base is not None else None,
         "serie": pontos,
     }
+
+
+@router.get("/objetivos/{objetivo_id}/copiloto")
+def copiloto_objetivo(
+    objetivo_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Copiloto de IA: sugere a proxima acao no programa a partir dos dados.
+    IA sugere, humano decide. Minimizacao: sem nome de paciente."""
+    obj = db.query(ObjetivoTerapeutico).filter(ObjetivoTerapeutico.id == objetivo_id).first()
+    if not obj:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Objetivo nao encontrado")
+    plano = db.query(PlanoTerapeutico).filter(PlanoTerapeutico.id == obj.plano_id).first()
+    if not plano:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Plano do objetivo nao encontrado")
+    acesso_clinico.verificar_acesso_paciente(db, plano.paciente_id, current_user)
+
+    linhas = (
+        db.query(RegistroTentativa, Sessao)
+        .join(Sessao, Sessao.id == RegistroTentativa.sessao_id)
+        .filter(RegistroTentativa.objetivo_id == obj.id)
+        .order_by(Sessao.data_sessao)
+        .all()
+    )
+    serie = []
+    for reg, sess in linhas:
+        pct = reg.percentual_independencia
+        if pct is None and reg.tentativas:
+            pct = round((reg.acertos or 0) * 100.0 / reg.tentativas, 2)
+        serie.append({
+            "data": str(sess.data_sessao) if sess.data_sessao else None,
+            "percentual_independencia": float(pct) if pct is not None else None,
+            "acertos": reg.acertos, "tentativas": reg.tentativas,
+            "nivel_ajuda": _v(reg.nivel_ajuda), "fase": reg.fase,
+        })
+    com_dados = [p for p in serie if p["percentual_independencia"] is not None]
+    if len(com_dados) < 2:
+        return {
+            "recomendacao": "REVER_CRITERIO", "titulo": "Dados insuficientes",
+            "justificativa": "Ainda ha poucas sessoes registradas para uma recomendacao confiavel.",
+            "proxima_acao": "Registre mais algumas sessoes de coleta antes de decidir.",
+            "confianca": None, "sem_dados": True,
+        }
+    return copiloto_service.sugerir_proxima_acao(
+        descricao=obj.descricao,
+        criterio=obj.criterio_mastery,
+        linha_base=float(obj.linha_base) if obj.linha_base is not None else None,
+        status=_v(obj.status),
+        serie=serie[-12:],
+    )
 
 
 # ============================================================================

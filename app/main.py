@@ -54,6 +54,7 @@ from app.api.routes import materiais_adaptados  # MATERIAIS ADAPTADOS COM IA
 from app.api.routes import student_materiais_adaptados  # TC-027: PONTE PROFESSOR -> PORTAL DO ALUNO
 from app.api.routes import planos  # PLANOS E ASSINATURAS MULTI-TENANT
 from app.api.routes import escolas  # ESCOLAS (TENANTS)
+from app.api.routes import professores  # ESCOLA - onboarding de professores
 from app.api.routes import planejamento_bncc  # PLANEJAMENTO BNCC E PEI
 from app.api.routes import calendario_atividades  # CALENDÁRIO DE ATIVIDADES PEI
 from app.api.routes import student_pei  # PEI PARA PORTAL DO ALUNO
@@ -401,6 +402,7 @@ app.include_router(materiais_adaptados.router, prefix="/api/v1", tags=["🎨 Mat
 app.include_router(student_materiais_adaptados.router, prefix="/api/v1", tags=["🎨 Student Materiais Adaptados"])
 app.include_router(planos.router, prefix="/api/v1", tags=["💳 Planos"])
 app.include_router(escolas.router, prefix="/api/v1", tags=["🏫 Escolas"])
+app.include_router(professores.router, prefix="/api/v1", tags=["🏫 Escolas (Professores)"])
 app.include_router(planejamento_bncc.router, prefix="/api/v1", tags=["📚 Planejamento BNCC"])
 app.include_router(calendario_atividades.router, prefix="/api/v1", tags=["📅 Calendário"])
 app.include_router(student_pei.router, prefix="/api/v1/student", tags=["🎯 PEI Estudante"])

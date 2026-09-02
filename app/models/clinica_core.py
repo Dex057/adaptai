@@ -15,7 +15,7 @@ Enums: valor == NOME em MAIUSCULO, para casar com os literais ENUM das migration
 """
 from sqlalchemy import (
     Column, Integer, String, Text, Date, DateTime, Boolean, ForeignKey,
-    Enum as SQLEnum,
+    Enum as SQLEnum, DECIMAL,
 )
 from datetime import datetime, timezone
 import enum
@@ -128,6 +128,7 @@ class Profissional(Base):
     conselho_numero = Column(String(50), nullable=True)
     papel = Column(SQLEnum(PapelProfissional), nullable=False, default=PapelProfissional.TERAPEUTA)
     ativo = Column(Boolean, nullable=False, default=True)
+    percentual_repasse = Column(DECIMAL(5, 2), nullable=True)
     criado_em = Column(DateTime, default=_agora)
     atualizado_em = Column(DateTime, default=_agora, onupdate=_agora)
 

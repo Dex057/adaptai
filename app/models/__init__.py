@@ -292,3 +292,6 @@ __all__ += ["Anamnese"]
 
 from app.models.clinica_anexo import AnexoProntuario
 __all__ += ["AnexoProntuario"]
+
+from app.models.clinica_repasse import Repasse
+__all__ += ["Repasse"]

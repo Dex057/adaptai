@@ -151,7 +151,7 @@ def rascunhar_evolucao(
             "acertos": reg.acertos,
             "percentual_independencia": float(reg.percentual_independencia)
                 if reg.percentual_independencia is not None else None,
-            "nivel_ajuda": _v(reg.nivel_ajuda),
+            "nivel_ajuda": _v(reg.nivel_ajuda), "fase": reg.fase,
         })
 
     texto = evolucao_service.rascunhar_evolucao(
@@ -325,6 +325,7 @@ class RegistroRevisado(BaseModel):
     tentativas: int = Field(0, ge=0)
     acertos: int = Field(0, ge=0)
     nivel_ajuda: Optional[NivelAjuda] = None
+    fase: Optional[str] = None
 
 
 class ConfirmarFolha(BaseModel):
@@ -362,6 +363,7 @@ def confirmar_folha(
             tentativas=r.tentativas,
             acertos=r.acertos,
             nivel_ajuda=r.nivel_ajuda,
+            fase=r.fase,
             percentual_independencia=pct,
             criado_em=_agora(),
         )

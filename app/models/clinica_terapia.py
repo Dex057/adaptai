@@ -118,6 +118,7 @@ class RegistroTentativa(Base):
     acertos = Column(Integer, nullable=False, default=0)
     nivel_ajuda = Column(SQLEnum(NivelAjuda), nullable=True)
     percentual_independencia = Column(DECIMAL(5, 2), nullable=True)
+    fase = Column(String(40), nullable=True)
     criado_em = Column(DateTime, default=_agora)
 
 

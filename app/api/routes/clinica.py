@@ -27,6 +27,7 @@ from app.api.dependencies import get_current_user
 from app.models.user import User, UserRole
 from app.core.entitlements import requer_modulo, Modulo
 from app.services import acesso_clinico
+from app.services import tradutor_familia_service
 from app.services import relatorio_evolucao_service
 from app.services import pti_service
 from app.models.clinica_core import (
@@ -578,6 +579,7 @@ def _evolucao_dict(e: Evolucao) -> dict:
         "assinado_em": str(e.assinado_em) if e.assinado_em else None,
         "assinada": e.assinado_em is not None,
         "assinatura_hash": e.assinatura_hash,
+        "resumo_familia": e.resumo_familia,
     }
 
 
@@ -662,6 +664,38 @@ def verificar_evolucao(
         "hash": ev.assinatura_hash,
         "assinado_em": str(ev.assinado_em), "assinado_por_id": ev.assinado_por_id,
     }
+
+
+class ResumoFamiliaIn(BaseModel):
+    texto: Optional[str] = None
+
+
+@router.post("/evolucoes/{evolucao_id}/resumo-familia")
+def gerar_resumo_familia(
+    evolucao_id: int,
+    body: ResumoFamiliaIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Gera (IA) ou salva (edicao) o resumo em linguagem simples p/ a familia.
+    So para evolucao ja assinada. IA rascunha; profissional aprova/edita."""
+    ev = db.query(Evolucao).filter(Evolucao.id == evolucao_id).first()
+    if not ev:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Evolucao nao encontrada")
+    p = acesso_clinico.verificar_acesso_paciente(
+        db, ev.paciente_id, current_user,
+        acao=AcaoAuditoria.EDITAR, recurso="evolucao", recurso_id=ev.id,
+    )
+    if ev.assinado_em is None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Assine a evolucao antes de gerar o resumo para a familia.")
+    if body.texto is not None:
+        ev.resumo_familia = (body.texto or "").strip() or None
+    else:
+        primeiro = (p.nome or "").strip().split(" ")[0] if (p and p.nome) else ""
+        ev.resumo_familia = tradutor_familia_service.traduzir(ev.texto, primeiro)
+    db.commit()
+    db.refresh(ev)
+    return {"id": ev.id, "resumo_familia": ev.resumo_familia}
 
 
 # ============================================================================

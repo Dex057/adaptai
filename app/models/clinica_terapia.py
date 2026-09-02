@@ -137,4 +137,5 @@ class Evolucao(Base):
     assinado_por_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     assinado_em = Column(DateTime, nullable=True)  # NULL = nao assinada
     assinatura_hash = Column(String(64), nullable=True)  # SHA-256 no ato da assinatura
+    resumo_familia = Column(Text, nullable=True)  # versao em linguagem simples p/ o portal da familia
     criado_em = Column(DateTime, default=_agora)

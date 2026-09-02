@@ -96,7 +96,7 @@ def portal(token: str, db: Session = Depends(get_db)):
             for o in objetivos
         ],
         "evolucoes": [
-            {"texto": e.texto, "data": str(e.assinado_em) if e.assinado_em else None}
+            {"texto": e.texto, "resumo": e.resumo_familia, "data": str(e.assinado_em) if e.assinado_em else None}
             for e in evolucoes
         ],
     }

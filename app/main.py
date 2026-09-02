@@ -37,6 +37,7 @@ from app.api.routes import clinica_comportamento  # CLINICA - comportamento ABC
 from app.api.routes import clinica_instrumentos  # CLINICA - instrumentos
 from app.api.routes import clinica_faturamento  # CLINICA - faturamento/convenios
 from app.api.routes import clinica_anamnese  # CLINICA - anamnese/admissao
+from app.api.routes import clinica_anexos  # CLINICA - anexos do prontuario
 from app.api.routes import provas  # NOVA ROTA DE PROVAS
 from app.api.routes import student_provas  # ROTAS ESTUDANTES
 from app.api.routes import professor_analytics  # ANALYTICS DE PROVAS PARA PROFESSORES
@@ -422,6 +423,7 @@ app.include_router(clinica_comportamento.router, prefix="/api/v1", tags=["🏥 C
 app.include_router(clinica_instrumentos.router, prefix="/api/v1", tags=["🏥 Clínica (Instrumentos)"])
 app.include_router(clinica_faturamento.router, prefix="/api/v1", tags=["🏥 Clínica (Faturamento)"])
 app.include_router(clinica_anamnese.router, prefix="/api/v1", tags=["🏥 Clínica (Anamnese)"])
+app.include_router(clinica_anexos.router, prefix="/api/v1", tags=["🏥 Clínica (Anexos)"])
 app.include_router(student_ilustracoes.router, prefix="/api/v1", tags=["🎨 Ilustrações (Aluno)"])
 app.include_router(comunicacao.router, prefix="/api/v1", tags=["💬 Comunicação"])
 app.include_router(plano_aula.router, prefix="/api/v1", tags=["📖 Plano de aula"])

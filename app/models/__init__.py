@@ -289,3 +289,6 @@ __all__ += ["Convenio", "Faturamento", "TipoConvenio", "StatusFaturamento", "Pre
 
 from app.models.clinica_anamnese import Anamnese
 __all__ += ["Anamnese"]
+
+from app.models.clinica_anexo import AnexoProntuario
+__all__ += ["AnexoProntuario"]

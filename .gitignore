@@ -105,3 +105,7 @@ painel.html
 # Claude Code - permissoes/aprovacoes de sessao, especificas desta maquina.
 # agents/ e commands/ (compartilhados pelo time) NAO entram aqui.
 .claude/settings.local.json
+
+_ativar_prod.py
+_setup_producao.py
+_verificar_senha.py

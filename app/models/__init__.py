@@ -231,3 +231,70 @@ __all__ = [
     "FonteIlustracao",
     "StatusIlustracao",
 ]
+
+
+# ============================================
+# Clinica (vertical CLINICA - Fase 0 + Modulo 1)
+# ============================================
+from app.models.clinica_core import (
+    EscolaModulo, Profissional, Paciente, EquipeCaso, Consentimento,
+    VinculoAlunoPaciente, AuditoriaAcesso,
+    ModuloEscola, Especialidade, Conselho, PapelProfissional, PapelNoCaso,
+    StatusPaciente, TipoConsentimento, AcaoAuditoria,
+)
+from app.models.clinica_terapia import (
+    PlanoTerapeutico, ObjetivoTerapeutico, Sessao, RegistroTentativa, Evolucao,
+    StatusPlanoTerapeutico, StatusObjetivoTerapeutico, Presenca, NivelAjuda,
+)
+
+__all__ += [
+    "EscolaModulo", "Profissional", "Paciente", "EquipeCaso", "Consentimento",
+    "VinculoAlunoPaciente", "AuditoriaAcesso",
+    "ModuloEscola", "Especialidade", "Conselho", "PapelProfissional", "PapelNoCaso",
+    "StatusPaciente", "TipoConsentimento", "AcaoAuditoria",
+    "PlanoTerapeutico", "ObjetivoTerapeutico", "Sessao", "RegistroTentativa", "Evolucao",
+    "StatusPlanoTerapeutico", "StatusObjetivoTerapeutico", "Presenca", "NivelAjuda",
+]
+
+
+# Clinica - CAA (pranchas de comunicacao)
+from app.models.clinica_caa import Prancha, PranchaItem, TipoPrancha
+__all__ += ["Prancha", "PranchaItem", "TipoPrancha"]
+
+# Clinica - Agenda
+from app.models.clinica_agenda import Agendamento, StatusAgendamento
+__all__ += ["Agendamento", "StatusAgendamento"]
+
+# Clinica - Programa de casa
+from app.models.clinica_casa import TarefaCasa, TarefaCasaCheck
+__all__ += ["TarefaCasa", "TarefaCasaCheck"]
+
+# Clinica - Mensagens familia
+from app.models.clinica_mensagens import MensagemFamilia, OrigemMensagem
+__all__ += ["MensagemFamilia", "OrigemMensagem"]
+
+# Clinica - Comportamento (ABC)
+from app.models.clinica_comportamento import RegistroComportamento, Intensidade
+__all__ += ["RegistroComportamento", "Intensidade"]
+
+# Clinica - Instrumentos padronizados
+from app.models.clinica_instrumentos import AplicacaoInstrumento
+__all__ += ["AplicacaoInstrumento"]
+
+# Clinica - Faturamento/convenios
+from app.models.clinica_faturamento import (
+    Convenio, Faturamento, TipoConvenio, StatusFaturamento, PrecoEspecialidade,
+)
+__all__ += ["Convenio", "Faturamento", "TipoConvenio", "StatusFaturamento", "PrecoEspecialidade"]
+
+from app.models.clinica_anamnese import Anamnese
+__all__ += ["Anamnese"]
+
+from app.models.clinica_anexo import AnexoProntuario
+__all__ += ["AnexoProntuario"]
+
+from app.models.clinica_repasse import Repasse
+__all__ += ["Repasse"]
+
+from app.models.clinica_supervisao import FidelidadeAplicacao, IOARegistro
+__all__ += ["FidelidadeAplicacao", "IOARegistro"]

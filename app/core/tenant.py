@@ -268,9 +268,13 @@ def enforce_limite_professores(db: Session, user: User) -> None:
     limite_professores do plano.
 
     Enforcement soft, igual a enforce_limite_alunos: super_admin liberado; escola
-    sem assinatura ativa/trial liberada (grandfather). Conta ao vivo TODOS os
-    usuarios ativos da escola (o admin conta como professor - mesma convencao de
-    checkout.py e de Assinatura.professores_ativos).
+    sem assinatura ativa/trial liberada (grandfather).
+
+    Conta ao vivo apenas usuarios com role TEACHER. O admin/coordenador que
+    gerencia a escola NAO consome cota - senao um plano com limite_professores=1
+    (o plano Gratuito) ficaria travado em zero professores, ja que a escola nasce
+    com 1 admin. E o unico fluxo que chama isto (routes/professores.py) so cria
+    role=TEACHER, entao contar so TEACHER e o que casa com o que a tela gerencia.
     """
     if user.role == UserRole.SUPER_ADMIN:
         return
@@ -280,6 +284,7 @@ def enforce_limite_professores(db: Session, user: User) -> None:
 
     em_uso = db.query(User).filter(
         User.escola_id == user.escola_id,
+        User.role == UserRole.TEACHER,
         User.is_active == True,  # noqa: E712
     ).count()
     if em_uso >= assinatura.plano.limite_professores:

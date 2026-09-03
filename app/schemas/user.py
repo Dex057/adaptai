@@ -92,6 +92,42 @@ class UserCreateAdmin(UserBase):
     def _validar_senha(cls, v: str) -> str:
         return validar_senha_forte(v)
 
+class ProfessorCreate(UserBase):
+    """
+    Criacao de professor/coordenador pela propria escola (endpoint protegido por
+    require_admin). O escopo de escola vem do token do admin - o cliente NAO
+    envia escola_id. Role limitada a teacher/coordinator (nao cria admin aqui).
+    """
+    password: str = Field(..., min_length=10, max_length=128, description="Senha inicial definida pelo admin")
+    role: UserRole = UserRole.TEACHER
+
+    @field_validator("password")
+    @classmethod
+    def _validar_senha(cls, v: str) -> str:
+        return validar_senha_forte(v)
+
+    @field_validator("role")
+    @classmethod
+    def _role_permitido(cls, v: UserRole) -> UserRole:
+        if v not in (UserRole.TEACHER, UserRole.COORDINATOR):
+            raise ValueError("Role deve ser 'teacher' ou 'coordinator'")
+        return v
+
+
+class ProfessorUpdate(BaseModel):
+    """Edicao de professor pela escola: renomear, trocar role (teacher/coordinator), ativar/desativar."""
+    name: Optional[str] = Field(None, min_length=3, max_length=255)
+    role: Optional[UserRole] = None
+    is_active: Optional[bool] = None
+
+    @field_validator("role")
+    @classmethod
+    def _role_permitido(cls, v):
+        if v is not None and v not in (UserRole.TEACHER, UserRole.COORDINATOR):
+            raise ValueError("Role deve ser 'teacher' ou 'coordinator'")
+        return v
+
+
 class UserLogin(BaseModel):
     email: EmailStr
     password: str  # Login nao valida forca - aceita qualquer string para verificar

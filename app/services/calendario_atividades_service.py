@@ -19,6 +19,8 @@ from app.models.prova import Prova, QuestaoGerada, ProvaAluno, StatusProva, Stat
 import tokenmeter as tm
 from app.core.features import F
 from app.core.anthropic_client import get_default_model
+from app.services import sintese_jornada_service
+from app.services import estrategias_service
 
 
 # Cliente Anthropic
@@ -88,6 +90,11 @@ class CalendarioAtividadesService:
         student = self.db.query(Student).filter(Student.id == pei.student_id).first()
         if not student:
             raise Exception("Aluno não encontrado")
+
+        # Jornada terapeutica como parametro (perfil vivo). "" se nao houver.
+        self._ctx_jornada = sintese_jornada_service.contexto_para_prompt(self.db, pei.student_id)
+        # Biblioteca de Estrategias de Adaptacao (KB curada) como parametro. "" se nao houver.
+        self._ctx_kb = estrategias_service.diretrizes_para_diagnostico(self.db, student.diagnosis or {}, getattr(student, "escola_id", None))
         
         # Data de início (padrão: próxima segunda-feira)
         if not data_inicio:
@@ -445,6 +452,8 @@ class CalendarioAtividadesService:
 - Nome: {student.name}
 - Ano escolar: {student.grade_level}
 - Diagnósticos: {json.dumps(diagnosticos, ensure_ascii=False)}
+{getattr(self, "_ctx_jornada", "")}
+{getattr(self, "_ctx_kb", "")}
 
 ## OBJETIVO DE APRENDIZAGEM:
 - Código BNCC: {objetivo.codigo_bncc or 'N/A'}

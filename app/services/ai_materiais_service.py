@@ -347,13 +347,25 @@ class MaterialAdaptadoService:
             if valor:
                 extras.append(f"- {rotulo}: {valor}")
 
-        if not regras and not extras:
+        # Jornada terapeutica (perfil vivo do aluno), injetada pela rota. Ja vem
+        # com cabecalho proprio; "" quando nao ha sintese.
+        jornada = str(diagnosticos.get("jornada") or "").strip()
+        kb = str(diagnosticos.get("estrategias_kb") or "").strip()
+
+        if not regras and not extras and not jornada and not kb:
             return ""
 
-        bloco = "\n\nADAPTACOES OBRIGATORIAS PARA ESTE ALUNO:\n"
-        bloco += "\n".join(f"- {r}" for r in regras)
+        bloco = ""
+        if kb:
+            # Biblioteca curada e a base; substitui as regras fixas quando existe.
+            bloco += kb
+        elif regras:
+            bloco += "\n\nADAPTACOES OBRIGATORIAS PARA ESTE ALUNO:\n"
+            bloco += "\n".join(f"- {r}" for r in regras)
         if extras:
             bloco += "\n\nPERFIL INFORMADO PELO PROFESSOR:\n" + "\n".join(extras)
+        if jornada:
+            bloco += "\n" + jornada
         bloco += (
             "\n\nAplique estas adaptacoes ao CONTEUDO, sem mencionar diagnosticos "
             "no material — o aluno nao deve ler sobre a propria condicao."

@@ -19,6 +19,8 @@ from app.models.user import User
 from app.models.student import Student
 from app.models.material_adaptado_gerado import MaterialAdaptadoGerado
 from app.services.ai_materiais_service import MaterialAdaptadoService
+from app.services import sintese_jornada_service
+from app.services import estrategias_service
 
 logger = get_logger(__name__)
 
@@ -230,6 +232,13 @@ async def gerar_materiais_adaptados(
             "dificuldades": diag.get("dificuldades", "")
         }
     
+    # Jornada terapeutica do aluno como parametro (perfil vivo). "" se nao houver.
+    diagnosticos["jornada"] = sintese_jornada_service.contexto_para_prompt(db, request_body.student_id)
+    # Biblioteca de Estrategias de Adaptacao (base curada por transtorno). "" se vazia.
+    diagnosticos["estrategias_kb"] = estrategias_service.diretrizes_para_diagnostico(
+        db, diagnosticos, getattr(current_user, "escola_id", None)
+    )
+
     # Inicializar service
     service = MaterialAdaptadoService()
     

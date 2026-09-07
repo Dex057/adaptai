@@ -5,6 +5,8 @@ Gera provas focadas nos pontos fracos identificados pela análise qualitativa
 from typing import Dict, List
 from sqlalchemy.orm import Session
 from app.core.config import settings
+from app.services import sintese_jornada_service
+from app.services import estrategias_service
 from app.core.anthropic_client import get_anthropic_client, get_fast_model
 from app.core.ai_usage import registrar_uso_ia
 from app.models.prova import Prova, QuestaoGerada, ProvaAluno, TipoQuestao, DificuldadeQuestao, StatusProva
@@ -65,6 +67,18 @@ class ProvaAdaptativaService:
         
         # Preparar prompt para IA
         prompt = self._criar_prompt_prova_reforco(prova_original, analise, prova_aluno)
+        # Jornada terapeutica do aluno como parametro (perfil vivo). "" se nao houver.
+        prompt += sintese_jornada_service.contexto_para_prompt(db, prova_aluno.aluno_id)
+        # Biblioteca de Estrategias de Adaptacao (KB curada) como parametro. "" se nao houver.
+        try:
+            from app.models.student import Student as _Student
+            _aluno = db.query(_Student).filter(_Student.id == prova_aluno.aluno_id).first()
+            if _aluno is not None:
+                prompt += estrategias_service.diretrizes_para_diagnostico(
+                    db, _aluno.diagnosis or {}, getattr(_aluno, "escola_id", None)
+                )
+        except Exception:
+            pass
         
         # Gerar questões com IA
         questoes_json = self._chamar_claude_api(prompt)

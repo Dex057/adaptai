@@ -46,6 +46,8 @@ from app.schemas.prova import (
 )
 from app.services.prova_ai_service import prova_ai_service, ProvaIAError
 from app.services.prova_folha_service import transcrever_folha
+from app.services import sintese_jornada_service
+from app.services import estrategias_service
 from app.api.dependencies import get_current_user, oauth2_scheme, get_user_from_token, verificar_acesso_aluno
 from app.core.tenant import enforce_limite_provas
 from app.core.logging_config import get_logger
@@ -145,6 +147,31 @@ Por favor, adapte as questões considerando:
 """
             print(f"[INFO] Aplicando adaptações para: {adaptacoes_str}")
         
+        # Jornada terapeutica: quando a prova e para UM aluno especifico, injeta
+        # o perfil vivo dele (personaliza a prova por aluno). Para turma (varios
+        # alunos) nao se aplica — nao ha uma unica jornada. "" se nao houver sintese.
+        if request.aluno_ids and len(request.aluno_ids) == 1:
+            # Sessao propria e curta: neste endpoint o `db` so e criado mais abaixo.
+            _db_j = SessionLocal()
+            try:
+                _aid = request.aluno_ids[0]
+                ctx_jornada = sintese_jornada_service.contexto_para_prompt(_db_j, _aid)
+                # Biblioteca de Estrategias de Adaptacao (KB curada) do aluno.
+                ctx_estrategias = ""
+                _aluno = _db_j.query(Student).filter(Student.id == _aid).first()
+                if _aluno is not None:
+                    ctx_estrategias = estrategias_service.diretrizes_para_diagnostico(
+                        _db_j, _aluno.diagnosis or {}, getattr(_aluno, "escola_id", None)
+                    )
+            finally:
+                _db_j.close()
+            if ctx_jornada:
+                conteudo_com_adaptacoes = conteudo_com_adaptacoes + ctx_jornada
+                print("[INFO] Prova personalizada pela jornada terapeutica do aluno")
+            if ctx_estrategias:
+                conteudo_com_adaptacoes = conteudo_com_adaptacoes + ctx_estrategias
+                print("[INFO] Prova personalizada pela Biblioteca de Estrategias de Adaptacao")
+
         questoes_geradas = await prova_ai_service.gerar_questoes(
             conteudo_prompt=conteudo_com_adaptacoes,
             materia=request.materia,

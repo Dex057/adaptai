@@ -16,7 +16,7 @@ from app.database import get_db
 from app.api.dependencies import get_current_user
 from app.models.user import User
 from app.core.entitlements import requer_modulo, Modulo
-from app.services import acesso_clinico, generalizacao_service
+from app.services import acesso_clinico, generalizacao_service, sintese_jornada_service, estrategias_service
 from app.models.clinica_core import VinculoAlunoPaciente
 from app.models.clinica_terapia import (
     PlanoTerapeutico, ObjetivoTerapeutico, RegistroTentativa, Sessao,
@@ -121,4 +121,21 @@ def generalizacao_sintese(paciente_id: int, db: Session = Depends(get_db), curre
     tem = bool(clinica) or bool(casa.get("itens")) or bool(escola.get("objetivos"))
     if not tem:
         return {"sintese": "Ainda não há dados suficientes nos três ambientes para uma síntese.", "acoes": []}
-    return generalizacao_service.sintetizar(clinica, casa, escola)
+    ctx_jornada = sintese_jornada_service.contexto_para_prompt_por_paciente(db, paciente_id)
+    # Biblioteca de Estrategias de Adaptacao (KB curada) via vinculo aluno<->paciente. "" se nao houver.
+    ctx_estrategias = ""
+    try:
+        _v = db.query(VinculoAlunoPaciente).filter(VinculoAlunoPaciente.paciente_id == paciente_id).first()
+        if _v:
+            _aluno = db.query(Student).filter(Student.id == _v.aluno_id).first()
+            if _aluno is not None:
+                ctx_estrategias = estrategias_service.diretrizes_para_diagnostico(
+                    db, _aluno.diagnosis or {}, getattr(_aluno, "escola_id", None)
+                )
+    except Exception:
+        ctx_estrategias = ""
+    return generalizacao_service.sintetizar(
+        clinica, casa, escola,
+        contexto_jornada=ctx_jornada,
+        contexto_estrategias=ctx_estrategias,
+    )

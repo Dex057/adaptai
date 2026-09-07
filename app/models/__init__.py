@@ -299,5 +299,8 @@ __all__ += ["Repasse"]
 from app.models.sintese_jornada import SinteseJornada  # Sintese da Jornada Terapeutica
 __all__ += ["SinteseJornada"]
 
+from app.models.estrategia_adaptacao import EstrategiaAdaptacao  # Biblioteca de Estrategias
+__all__ += ["EstrategiaAdaptacao"]
+
 from app.models.clinica_supervisao import FidelidadeAplicacao, IOARegistro
 __all__ += ["FidelidadeAplicacao", "IOARegistro"]

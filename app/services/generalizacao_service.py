@@ -54,7 +54,7 @@ def _bloco_escola(escola: Dict[str, Any]) -> str:
     return "\n".join(out)
 
 
-def _montar_prompt(clinica, casa, escola) -> str:
+def _montar_prompt(clinica, casa, escola, contexto_jornada: str = "", contexto_estrategias: str = "") -> str:
     return (
         "Voce e um supervisor de terapia ABA para criancas/adolescentes com TEA.\n"
         "Compare o desempenho do MESMO paciente em tres ambientes e avalie se os\n"
@@ -63,6 +63,8 @@ def _montar_prompt(clinica, casa, escola) -> str:
         "CLINICA (objetivos do PTI):\n" + _bloco_clinica(clinica) + "\n\n"
         "CASA (programa de casa, ultimos 7 dias):\n" + _bloco_casa(casa) + "\n\n"
         "ESCOLA (objetivos do PEI):\n" + _bloco_escola(escola) + "\n\n"
+        + (contexto_jornada or "") + "\n"
+        + (contexto_estrategias or "") + "\n"
         "Responda SOMENTE com JSON valido, sem markdown, no formato:\n"
         '{\"sintese\": \"<2-3 frases: onde ha generalizacao e onde ha lacuna>\", '
         '\"acoes\": [\"<acao pratica de generalizacao>\", \"<outra>\", \"<outra>\"]}'
@@ -82,8 +84,8 @@ def _parse(texto: str) -> Dict[str, Any]:
 
 
 @tm.feature(F.CLINICA_GENERALIZACAO)
-def sintetizar(clinica, casa, escola) -> Dict[str, Any]:
-    prompt = _montar_prompt(clinica, casa, escola)
+def sintetizar(clinica, casa, escola, contexto_jornada: str = "", contexto_estrategias: str = "") -> Dict[str, Any]:
+    prompt = _montar_prompt(clinica, casa, escola, contexto_jornada, contexto_estrategias)
     client = get_anthropic_client(timeout=60.0, max_retries=2)
     message = client.messages.create(
         model=get_default_model(),

@@ -115,6 +115,11 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440  # 24 horas
 
+    # Token de acesso ao painel de consumo de IA (/admin/ai-usage/painel?token=).
+    # Alternativa ao Basic Auth para abrir o painel de fora do app - usado pela
+    # function de proxy na Vercel. Vazio = so Basic Auth (comportamento antigo).
+    PAINEL_TOKEN: str = ""
+
     # Claude API (Anthropic)
     ANTHROPIC_API_KEY: str = ""
     CLAUDE_MODEL: str = "claude-sonnet-4-6"

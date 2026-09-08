@@ -3,6 +3,7 @@ Endpoints administrativos para monitoramento do sistema.
 
 Acesso restrito a ADMIN ou SUPER_ADMIN.
 """
+import secrets
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -15,6 +16,7 @@ from sqlalchemy import func
 
 from app.database import get_db
 from app.api.dependencies import require_admin
+from app.core.config import settings
 from app.core.security import verify_password
 from app.models.user import User, UserRole
 from app.models.background_task import BackgroundTask, BackgroundTaskStatus
@@ -290,13 +292,18 @@ def obter_painel_uso_ia(
     tag_tenant: str = "tenant_id",
     tag_extra: str = "material_tipo",
     refresh: bool = False,
+    token: str = "",
     credentials: HTTPBasicCredentials = Depends(_basic),
     db: Session = Depends(get_db),
 ):
     """
     Painel HTML de consumo de IA (mesmo gerado pelo `tokenmeter panel`).
 
-    Abra no navegador: ele pede usuario e senha de um admin via Basic Auth.
+    Duas formas de acesso:
+    - no navegador: usuario e senha de um admin via Basic Auth;
+    - `?token=<PAINEL_TOKEN>`: para abrir de fora do app sem sessao (usado
+      pela function de proxy na Vercel). So funciona se PAINEL_TOKEN estiver
+      configurado no backend.
 
     - `dias`: janela que abre selecionada no seletor de periodo (default 30)
     - `orcamento`: teto em USD, so para exibir o percentual consumido
@@ -305,7 +312,12 @@ def obter_painel_uso_ia(
       "material_tipo"; vazio desativa a secao)
     - `refresh=1`: ignora o cache de 5 minutos e regenera na hora
     """
-    _admin_por_basic(credentials, db)
+    # isascii(): compare_digest levanta TypeError com str nao-ASCII (o token
+    # gerado por token_urlsafe e sempre ASCII) - um ?token=cafe viraria 500.
+    token_ok = bool(settings.PAINEL_TOKEN) and token.isascii() and \
+        secrets.compare_digest(token, settings.PAINEL_TOKEN)
+    if not token_ok:
+        _admin_por_basic(credentials, db)
 
     chave = (dias, orcamento, tag_tenant, tag_extra)
     agora = time.monotonic()

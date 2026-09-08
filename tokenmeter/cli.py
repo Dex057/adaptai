@@ -82,6 +82,9 @@ def main(argv=None) -> int:
     pa.add_argument("--environment", default=None, help="filtra o ambiente (ex.: production)")
     pa.add_argument("--tag-tenant", default="tenant_id",
                     help="qual chave de tag usar como 'cliente' no painel")
+    pa.add_argument("--tag-extra", default="material_tipo",
+                    help="2a dimensao livre, tabelada por atividade (run_id); "
+                         "vazio desativa a secao")
     pa.add_argument("--budget", type=float, default=None,
                     help="orçamento mensal em USD; ativa a barra de orçamento")
     pa.add_argument("--title", default="Consumo de IA")
@@ -233,7 +236,8 @@ def main(argv=None) -> int:
             periodos = [int(x) for x in args.periodos.split(",") if x.strip()]
         caminho = gerar(tm._require(), args.out, dias=args.days, periodos=periodos,
                         service=args.service, environment=args.environment,
-                        tag_tenant=args.tag_tenant, titulo=args.title,
+                        tag_tenant=args.tag_tenant,
+                        tag_extra=args.tag_extra or None, titulo=args.title,
                         orcamento=args.budget)
         print(f"tokenmeter: painel gerado -> {caminho}")
         print("abra no navegador. arquivo único, sem servidor, funciona offline.")

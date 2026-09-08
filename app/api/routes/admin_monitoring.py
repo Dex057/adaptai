@@ -288,6 +288,7 @@ def obter_painel_uso_ia(
     dias: int = 30,
     orcamento: float = None,
     tag_tenant: str = "tenant_id",
+    tag_extra: str = "material_tipo",
     refresh: bool = False,
     credentials: HTTPBasicCredentials = Depends(_basic),
     db: Session = Depends(get_db),
@@ -300,11 +301,13 @@ def obter_painel_uso_ia(
     - `dias`: janela que abre selecionada no seletor de periodo (default 30)
     - `orcamento`: teto em USD, so para exibir o percentual consumido
     - `tag_tenant`: qual tag corta a dimensao livre (default "tenant_id")
+    - `tag_extra`: 2a dimensao, tabelada por atividade/custo (default
+      "material_tipo"; vazio desativa a secao)
     - `refresh=1`: ignora o cache de 5 minutos e regenera na hora
     """
     _admin_por_basic(credentials, db)
 
-    chave = (dias, orcamento, tag_tenant)
+    chave = (dias, orcamento, tag_tenant, tag_extra)
     agora = time.monotonic()
 
     if not refresh:
@@ -336,7 +339,8 @@ def obter_painel_uso_ia(
         )
 
     janelas = sorted(set(PERIODOS_PADRAO) | {dias})
-    paineis = [coletar(store, dias=d, tag_tenant=tag_tenant) for d in janelas]
+    paineis = [coletar(store, dias=d, tag_tenant=tag_tenant,
+                       tag_extra=tag_extra or None) for d in janelas]
     html = render(paineis, titulo="AdaptAI - consumo de IA",
                   orcamento=orcamento, inicial=dias)
 

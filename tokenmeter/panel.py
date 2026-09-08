@@ -43,7 +43,8 @@ def _d(v) -> Decimal:
 
 
 def coletar(store, *, dias: int = 30, service: str | None = None,
-            environment: str | None = None, tag_tenant: str = "tenant_id") -> dict:
+            environment: str | None = None, tag_tenant: str = "tenant_id",
+            tag_extra: str | None = "material_tipo") -> dict:
     """Roda as agregações. Uma consulta por bloco do painel — nenhuma é pesada."""
     ev = f"{store.ev.name}"
     tg = f"{store.tag.name}"
@@ -86,6 +87,19 @@ def coletar(store, *, dias: int = 30, service: str | None = None,
                              ON t.event_id = e.event_id AND t.tag_key = :tk
                            WHERE {W} GROUP BY t.tag_value ORDER BY custo DESC""",
                        tk=tag_tenant)
+        # Corte por uma segunda dimensao livre (default: material_tipo). Onde a
+        # feature e uma so mas o custo varia por subtipo — o caso do
+        # material_adaptado no AdaptAI, com ~37 tipos sob a mesma feature.
+        # atividades = COUNT(DISTINCT run_id): quantas geracoes distintas, nao
+        # quantas chamadas de IA (um tipo com imagem dispara varias por atividade).
+        por_extra = q(f"""SELECT t.tag_value AS k,
+                          COUNT(DISTINCT e.run_id) AS atividades,
+                          COUNT(*) AS chamadas,
+                          COALESCE(SUM(e.cost_usd),0) AS custo
+                          FROM {ev} e JOIN {tg} t
+                            ON t.event_id = e.event_id AND t.tag_key = :tke
+                          WHERE {W} GROUP BY t.tag_value ORDER BY custo DESC""",
+                      tke=tag_extra) if tag_extra else []
         cobertura = q(f"""SELECT e.feature_source AS k, COUNT(*) AS n
                           FROM {ev} e WHERE {W} GROUP BY e.feature_source""")
         status = q(f"""SELECT e.status AS k, COUNT(*) AS n FROM {ev} e WHERE {W}
@@ -153,6 +167,7 @@ def coletar(store, *, dias: int = 30, service: str | None = None,
             "por_modelo": por_modelo, "por_tenant": por_tenant, "cobertura": cobertura,
             "status": status, "sem_preco": sem_preco, "por_entidade": por_entidade,
             "servicos": servicos, "tag_tenant": tag_tenant,
+            "por_extra": por_extra, "tag_extra": tag_extra,
             "tokens_feature": tokens_feature, "latencia": latencia,
             "cache_modelo": cache_modelo, "erros": erros, "por_rota": por_rota,
             "imagens": imagens}
@@ -579,6 +594,34 @@ def _miolo(dados: dict, orcamento: float | None = None) -> str:
           entrada. Este custo está incluído no total acima, sem rótulo próprio.</p>
           {tabela_err}</section>"""
 
+    # ---- segunda dimensão livre (default: material_tipo) -----------------
+    # Tabela, não barra: são dezenas de subtipos e o top-8 de uma barra
+    # esconderia a cauda — que é justamente onde mora "esse tipo custa caro".
+    extra_html = ""
+    if dados.get("por_extra"):
+        linhas_extra = []
+        for x in dados["por_extra"]:
+            ativ = int(x["atividades"] or 0)
+            c = _d(x["custo"])
+            linhas_extra.append({
+                "k": x["k"],
+                "atividades": _int(ativ),
+                "chamadas": _int(x["chamadas"]),
+                "custo": f"US$ {_fmt(c, 6)}",
+                "media": f"US$ {_fmt(c / ativ, 6)}" if ativ else "—",
+            })
+        tabela_extra = _tabela(linhas_extra, [
+            ("k", dados["tag_extra"]), ("atividades", "Atividades"),
+            ("chamadas", "Chamadas de IA"), ("custo", "Custo"),
+            ("media", "Custo/atividade")])
+        extra_html = f"""<section class="card" style="margin-top:14px">
+          <h2>Por {html.escape(str(dados['tag_extra']))}</h2>
+          <p class="sub">Segunda dimensão livre. "Atividades" conta execuções
+          distintas (run_id), não chamadas de IA — um subtipo com imagem dispara
+          várias chamadas por atividade. Custo/atividade é o número comparável
+          entre subtipos.</p>
+          {tabela_extra}</section>"""
+
     imagens_html = ""
     if dados["imagens"]:
         tabela_img = _tabela(
@@ -639,6 +682,7 @@ def _miolo(dados: dict, orcamento: float | None = None) -> str:
 <p class="sub">Dimensão livre de atribuição.</p>
 {_svg_barras(dados['por_tenant'], SERIES_VAR + [OUTROS_VAR], 'custo por tenant')}</section>
 
+{extra_html}
 {servicos_html}
 {imagens_html}
 {erros_html}

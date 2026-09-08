@@ -20,6 +20,13 @@ from app.models.student import Student
 from app.models.material_adaptado_gerado import MaterialAdaptadoGerado
 from app.services.ai_materiais_service import MaterialAdaptadoService
 
+# tokenmeter: um escopo de atribuicao por tipo de material. Sem isto, as
+# sub-chamadas de tipos com imagem (hq_tirinha, album_figurinhas) caem em
+# run_ids separados e sem a tag material_tipo — impossivel somar o custo de
+# UMA atividade. Ver app/core/features.py e ai_materiais_service._chamar_ia.
+import tokenmeter as tm
+from app.core.features import F
+
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/materiais-adaptados", tags=["Materiais Adaptados"])
@@ -256,12 +263,17 @@ async def gerar_materiais_adaptados(
         try:
             print(f"[IA] Gerando {config['nome']}...")
             metodo = getattr(service, metodo_nome)
-            
-            # Chamar metodo com ou sem diagnosticos
-            if config.get("usa_diagnostico"):
-                resultado = metodo(request_body.disciplina, serie, request_body.conteudo, diagnosticos)
-            else:
-                resultado = metodo(request_body.disciplina, serie, request_body.conteudo)
+
+            # Um run_id + tag material_tipo para a atividade inteira (texto +
+            # ilustracoes). ilustracao_service ainda grava feature=ilustracao_ia,
+            # mas herda esta tag — da pra cortar "quanto de ilustracao_ia foi
+            # pra hq_tirinha" e somar o custo por run_id.
+            with tm.context(feature=F.MATERIAL_ADAPTADO, tags={"material_tipo": tipo}):
+                # Chamar metodo com ou sem diagnosticos
+                if config.get("usa_diagnostico"):
+                    resultado = metodo(request_body.disciplina, serie, request_body.conteudo, diagnosticos)
+                else:
+                    resultado = metodo(request_body.disciplina, serie, request_body.conteudo)
             
             response[tipo] = resultado
             response["materiais_gerados"].append(tipo)

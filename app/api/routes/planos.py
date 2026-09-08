@@ -12,9 +12,10 @@ from app.database import get_db
 from app.api.dependencies import get_current_user
 from app.models.user import User, UserRole
 from app.models.plano import Plano
-from app.models.escola import Escola, ConfiguracaoEscola
+from app.models.escola import Escola
 from app.models.assinatura import Assinatura, Fatura, StatusAssinatura, StatusFatura
 from app.core.tenant import get_tenant_context, TenantContext
+from app.services.tenant_provisioning import criar_escola_com_admin, TenantProvisioningError
 
 router = APIRouter(prefix="/planos", tags=["💳 Planos e Assinaturas"])
 
@@ -73,13 +74,28 @@ class AssinaturaResponse(BaseModel):
         from_attributes = True
 
 
-class EscolaCreate(BaseModel):
-    nome: str = Field(..., min_length=3)
-    email: str
-    cnpj: Optional[str] = None
-    telefone: Optional[str] = None
-    tipo: str = "ESCOLA"
-    plano_slug: str = "gratuito"
+class AtivacaoManualRequest(BaseModel):
+    """Dados coletados pelo time comercial na conversa (WhatsApp) antes de ativar a conta."""
+    escola_nome: str = Field(..., min_length=3)
+    escola_cnpj: Optional[str] = None
+    escola_tipo: str = "ESCOLA"
+    escola_telefone: Optional[str] = None
+    admin_nome: str = Field(..., min_length=3)
+    admin_email: str
+    plano_id: int
+    valor_mensal: float = Field(..., gt=0, description="Valor negociado no contato - cobranca e por uso, sem tabela fixa.")
+    status_inicial: str = Field("trial", pattern="^(trial|ativa)$")
+    cep: Optional[str] = None
+    cidade: Optional[str] = None
+    estado: Optional[str] = None
+
+
+class AtivacaoManualResponse(BaseModel):
+    escola_id: int
+    usuario_id: int
+    assinatura_id: int
+    link_definir_senha: Optional[str] = None
+    link_pagamento: Optional[str] = None
 
 
 class AssinaturaUpdate(BaseModel):
@@ -436,65 +452,53 @@ def listar_todos_planos_admin(
     return db.query(Plano).order_by(Plano.ordem).all()
 
 
-@router.post("/admin/escola", status_code=status.HTTP_201_CREATED)
-def criar_escola_admin(
-    escola_data: EscolaCreate,
+@router.post("/admin/ativar-conta", status_code=status.HTTP_201_CREATED, response_model=AtivacaoManualResponse)
+def ativar_conta_manual(
+    dados: AtivacaoManualRequest,
     admin: User = Depends(require_super_admin),
     db: Session = Depends(get_db)
 ):
     """
-    👑 [ADMIN] Cria uma nova escola com assinatura inicial.
+    👑 [ADMIN] Ativa uma conta apos negociacao por fora (WhatsApp): cria a Escola,
+    o usuario admin e a Assinatura com o valor combinado (sem tabela de preco fixa -
+    cobranca e por uso). Devolve o link de "definir senha" para o time mandar pro
+    cliente pelo mesmo canal - a senha nunca trafega em texto puro.
+
+    status_inicial "trial" = 14 dias sem cobranca; "ativa" = cobranca ja no ciclo atual.
     """
-    if db.query(Escola).filter(Escola.email == escola_data.email).first():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Email já cadastrado"
-        )
-    
-    plano = db.query(Plano).filter(Plano.slug == escola_data.plano_slug).first()
+    plano = db.query(Plano).filter(Plano.id == dados.plano_id).first()
     if not plano:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Plano '{escola_data.plano_slug}' não encontrado"
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Plano não encontrado")
+
+    status_map = {"trial": StatusAssinatura.TRIAL.value, "ativa": StatusAssinatura.ATIVA.value}
+
+    try:
+        escola, usuario, assinatura, _senha, link_definir_senha, link_pagamento = criar_escola_com_admin(
+            db,
+            escola_nome=dados.escola_nome,
+            escola_cnpj=dados.escola_cnpj,
+            escola_tipo=dados.escola_tipo,
+            escola_telefone=dados.escola_telefone,
+            admin_nome=dados.admin_nome,
+            admin_email=dados.admin_email,
+            admin_senha=None,  # gera senha provisoria + link de definir senha
+            plano=plano,
+            valor_mensal=dados.valor_mensal,
+            status_inicial=status_map[dados.status_inicial],
+            cep=dados.cep,
+            cidade=dados.cidade,
+            estado=dados.estado,
         )
-    
-    nova_escola = Escola(
-        nome=escola_data.nome,
-        email=escola_data.email,
-        cnpj=escola_data.cnpj,
-        telefone=escola_data.telefone,
-        tipo=escola_data.tipo,
-        ativa=True
+    except TenantProvisioningError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    return AtivacaoManualResponse(
+        escola_id=escola.id,
+        usuario_id=usuario.id,
+        assinatura_id=assinatura.id,
+        link_definir_senha=link_definir_senha,
+        link_pagamento=link_pagamento,
     )
-    db.add(nova_escola)
-    db.flush()
-    
-    status_inicial = StatusAssinatura.TRIAL.value if plano.valor == 0 else StatusAssinatura.PENDENTE.value
-    data_fim = datetime.now() + timedelta(days=14) if plano.valor == 0 else None
-    
-    nova_assinatura = Assinatura(
-        escola_id=nova_escola.id,
-        plano_id=plano.id,
-        status=status_inicial,
-        valor_mensal=plano.valor,
-        data_fim=data_fim,
-        data_proxima_cobranca=datetime.now() + timedelta(days=30) if plano.valor > 0 else None
-    )
-    db.add(nova_assinatura)
-    
-    config = ConfiguracaoEscola(
-        escola_id=nova_escola.id
-    )
-    db.add(config)
-    
-    db.commit()
-    
-    return {
-        "message": "Escola criada com sucesso",
-        "escola_id": nova_escola.id,
-        "plano": plano.nome,
-        "status": status_inicial
-    }
 
 
 @router.put("/admin/assinatura/{escola_id}")

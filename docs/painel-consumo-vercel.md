@@ -52,16 +52,21 @@ https://SEU-APP.vercel.app/consumo-ia?key=XXX
 ```
 
 Aceita os mesmos query params do painel: `dias`, `orcamento`, `tag_tenant`,
-`tag_extra`, `refresh=1`. Ex.: `/consumo-ia?key=XXX&dias=7&refresh=1`.
+`tag_extra`, `refresh=1`, `atualizar`. Ex.: `/consumo-ia?key=XXX&dias=7&refresh=1`.
+
+O painel **se recarrega sozinho a cada 5 min** (`atualizar=300`, default). O
+período selecionado sobrevive ao reload. `atualizar=0` desliga; combine com
+`refresh=1` se quiser recálculo forçado a cada ciclo (mais caro).
 
 O caminho `/api/painel?key=XXX` funciona igual — `/consumo-ia` é só um alias
 (rewrite no `vercel.json`).
 
 ## Notas
 
-- **Cache:** o backend regenera no máximo a cada 5 min (cache em memória, por
-  worker). A function repassa `s-maxage=300` para a CDN da Vercel. `refresh=1`
-  fura o cache do backend.
+- **Cache:** só uma camada — o backend regenera no máximo a cada 5 min (cache em
+  memória, por worker). A function da Vercel manda `no-store` de propósito: com
+  o auto-reload de 5 min, uma segunda camada de cache na CDN faria o dado exibido
+  chegar a ~10 min de atraso. `refresh=1` fura o cache do backend.
 - **Acesso direto ao Railway** continua existindo: abrir
   `https://SEU-BACKEND.railway.app/api/v1/admin/ai-usage/painel` no navegador
   pede Basic Auth de um admin, como antes. O token é um caminho a mais, não um

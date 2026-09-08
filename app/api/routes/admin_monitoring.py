@@ -292,6 +292,7 @@ def obter_painel_uso_ia(
     tag_tenant: str = "tenant_id",
     tag_extra: str = "material_tipo",
     refresh: bool = False,
+    atualizar: int = 300,
     token: str = "",
     credentials: HTTPBasicCredentials = Depends(_basic),
     db: Session = Depends(get_db),
@@ -311,6 +312,9 @@ def obter_painel_uso_ia(
     - `tag_extra`: 2a dimensao, tabelada por atividade/custo (default
       "material_tipo"; vazio desativa a secao)
     - `refresh=1`: ignora o cache de 5 minutos e regenera na hora
+    - `atualizar`: intervalo (s) do auto-reload da pagina; default 300,
+      `atualizar=0` desliga. O reload pega dados no maximo 5 min atrasados
+      (cache do backend); combine com `refresh=1` para sempre recalcular.
     """
     # isascii(): compare_digest levanta TypeError com str nao-ASCII (o token
     # gerado por token_urlsafe e sempre ASCII) - um ?token=cafe viraria 500.
@@ -319,7 +323,7 @@ def obter_painel_uso_ia(
     if not token_ok:
         _admin_por_basic(credentials, db)
 
-    chave = (dias, orcamento, tag_tenant, tag_extra)
+    chave = (dias, orcamento, tag_tenant, tag_extra, atualizar)
     agora = time.monotonic()
 
     if not refresh:
@@ -354,7 +358,8 @@ def obter_painel_uso_ia(
     paineis = [coletar(store, dias=d, tag_tenant=tag_tenant,
                        tag_extra=tag_extra or None) for d in janelas]
     html = render(paineis, titulo="AdaptAI - consumo de IA",
-                  orcamento=orcamento, inicial=dias)
+                  orcamento=orcamento, inicial=dias,
+                  atualizar_s=atualizar if atualizar > 0 else None)
 
     with _painel_lock:
         _painel_cache[chave] = (agora, html)

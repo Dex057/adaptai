@@ -62,8 +62,9 @@ def seed(TestSession):
         db.refresh(escola_a)
         db.refresh(escola_b)
 
-        # Plano com limite baixo (3) para exercitar o enforcement.
-        plano = Plano(nome="Teste", slug="teste", valor=0, limite_alunos=100, limite_professores=3)
+        # Plano com limite baixo (2 TEACHERs) para exercitar o enforcement.
+        # O admin nao consome cota - so role=TEACHER conta.
+        plano = Plano(nome="Teste", slug="teste", valor=0, limite_alunos=100, limite_professores=2)
         db.add(plano)
         db.commit()
         db.refresh(plano)
@@ -152,8 +153,9 @@ class TestProfessores:
                          headers=auth(seed["token_admin_b"]), json={"ativo": False})
         assert r.status_code == 404
 
-    def test_limite_do_plano_bloqueia(self, client, seed):
-        # Plano limite_professores=3. Ativos: admin_a + prof_a1 + prof_novo = 3.
+    def test_admin_nao_consome_cota(self, client, seed):
+        # limite_professores=2. TEACHERs ativos: prof_a1 (seed) + prof_novo = 2.
+        # admin_a NAO conta. Logo o proximo TEACHER estoura o limite.
         r = client.post("/escolas/minha/professores", headers=auth(seed["token_admin_a"]),
                         json={"nome": "Excedente", "email": "excedente@esc.com"})
         assert r.status_code == 403

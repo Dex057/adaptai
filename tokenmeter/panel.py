@@ -44,16 +44,22 @@ def _d(v) -> Decimal:
 
 def coletar(store, *, dias: int = 30, service: str | None = None,
             environment: str | None = None, tag_tenant: str = "tenant_id",
-            tag_extra: str | None = "material_tipo") -> dict:
+            tag_extra: str | None = None) -> dict:
     """Roda as agregações. Uma consulta por bloco do painel — nenhuma é pesada."""
     ev = f"{store.ev.name}"
     tg = f"{store.tag.name}"
     onde = ["e.occurred_at >= :ini"]
     p: dict = {"ini": dt.datetime.utcnow() - dt.timedelta(days=dias)}
+    # Janela imediatamente anterior, do mesmo tamanho — alimenta o "vs período
+    # anterior" nos tiles. Só os dois números do resumo, não um painel inteiro.
+    p["ini_ant"] = p["ini"] - dt.timedelta(days=dias)
+    filtro_extra = ""
     if service:
         onde.append("e.service = :svc"); p["svc"] = service
+        filtro_extra += " AND e.service = :svc"
     if environment:
         onde.append("e.environment = :env"); p["env"] = environment
+        filtro_extra += " AND e.environment = :env"
     W = " AND ".join(onde)
 
     with store.connect() as con:
@@ -70,6 +76,11 @@ def coletar(store, *, dias: int = 30, service: str | None = None,
                        COUNT(DISTINCT run_id) AS execucoes,
                        MIN(occurred_at) AS ini, MAX(occurred_at) AS fim
                        FROM {ev} e WHERE {W}""")[0]
+        anterior = q(f"""SELECT COUNT(*) AS chamadas,
+                         COALESCE(SUM(cost_usd),0) AS custo
+                         FROM {ev} e
+                         WHERE e.occurred_at >= :ini_ant AND e.occurred_at < :ini
+                         {filtro_extra}""")[0]
         por_dia = q(f"""SELECT e.occurred_date AS dia, e.feature AS k,
                         COALESCE(SUM(e.cost_usd),0) AS custo
                         FROM {ev} e WHERE {W} GROUP BY e.occurred_date, e.feature
@@ -87,11 +98,11 @@ def coletar(store, *, dias: int = 30, service: str | None = None,
                              ON t.event_id = e.event_id AND t.tag_key = :tk
                            WHERE {W} GROUP BY t.tag_value ORDER BY custo DESC""",
                        tk=tag_tenant)
-        # Corte por uma segunda dimensao livre (default: material_tipo). Onde a
-        # feature e uma so mas o custo varia por subtipo — o caso do
-        # material_adaptado no AdaptAI, com ~37 tipos sob a mesma feature.
-        # atividades = COUNT(DISTINCT run_id): quantas geracoes distintas, nao
-        # quantas chamadas de IA (um tipo com imagem dispara varias por atividade).
+        # Corte por uma segunda dimensao livre, opcional (--tag-extra). Para
+        # quando uma unica feature esconde variacao de custo por subtipo — um
+        # gerador que produz N formatos sob a mesma feature, p.ex.
+        # atividades = COUNT(DISTINCT run_id): quantas execucoes distintas, nao
+        # quantas chamadas de IA (uma execucao com imagem dispara varias).
         por_extra = q(f"""SELECT t.tag_value AS k,
                           COUNT(DISTINCT e.run_id) AS atividades,
                           COUNT(*) AS chamadas,
@@ -163,7 +174,8 @@ def coletar(store, *, dias: int = 30, service: str | None = None,
                         COALESCE(SUM(e.priced),0) AS precificadas
                         FROM {ev} e WHERE {W} AND e.operation = 'image_generation'
                         GROUP BY e.model ORDER BY imagens DESC""")
-    return {"dias": dias, "resumo": resumo, "por_dia": por_dia, "por_feature": por_feature,
+    return {"dias": dias, "resumo": resumo, "anterior": anterior, "por_dia": por_dia,
+            "por_feature": por_feature,
             "por_modelo": por_modelo, "por_tenant": por_tenant, "cobertura": cobertura,
             "status": status, "sem_preco": sem_preco, "por_entidade": por_entidade,
             "servicos": servicos, "tag_tenant": tag_tenant,
@@ -197,6 +209,37 @@ def _ms(v) -> str:
     return f"{n:.0f} ms" if n < 1000 else _fmt(Decimal(str(n / 1000)), 1) + " s"
 
 
+def _variacao(atual, anterior) -> str:
+    """"▲ 42% vs anterior" — string vazia quando não há período anterior com dado."""
+    a = float(anterior or 0)
+    if a <= 0:
+        return ""
+    p = 100 * (float(atual) - a) / a
+    return f"{'▲' if p >= 0 else '▼'} {abs(p):.0f}% vs período anterior"
+
+
+def _pico_diario(por_dia: list[dict], fator: float = 3.0) -> dict | None:
+    """Dia mais caro contra a mediana diária. `None` se há menos de 7 dias com
+    dado (amostra pequena demais para chamar de anomalia) ou nenhum pico.
+
+    Mediana, não média: um único dia de pico não desloca a mediana, então o
+    'fator' compara contra o dia típico, não contra um patamar já contaminado.
+    """
+    diario: dict[str, Decimal] = {}
+    for x in por_dia:
+        diario[str(x["dia"])] = diario.get(str(x["dia"]), Decimal(0)) + _d(x["custo"])
+    if len(diario) < 7:
+        return None
+    vals = sorted(diario.values())
+    n = len(vals)
+    mediana = vals[n // 2] if n % 2 else (vals[n // 2 - 1] + vals[n // 2]) / 2
+    dia_pico, custo_pico = max(diario.items(), key=lambda kv: kv[1])
+    if mediana <= 0 or custo_pico <= mediana * Decimal(str(fator)):
+        return {"pico": False, "mediana": mediana}
+    return {"pico": True, "mediana": mediana, "dia": dia_pico,
+            "custo": custo_pico, "mult": custo_pico / mediana}
+
+
 def _economia_cache(cache_modelo: list[dict]) -> dict:
     """Quanto o prompt caching poupou, contra ter pago entrada cheia.
 
@@ -204,9 +247,9 @@ def _economia_cache(cache_modelo: list[dict]) -> dict:
     desconto por token é `input_per_mtok - cache_read_per_mtok`.
 
     ESTIMATIVA, não fatura: o painel agrega o período inteiro e resolve a tarifa
-    pelo instante de agora. A tabela tem faixas com validade — o Sonnet vira de
-    US$ 2/10 para US$ 3/15 em 01/09 —, então uma virada de preço dentro da janela
-    desloca o número. Serve para dimensionar ordem de grandeza.
+    pelo instante de agora. A tabela tem faixas com validade, então uma virada de
+    preço dentro da janela desloca o número. Serve para dimensionar ordem de
+    grandeza.
     """
     lido = sum(int(r["cache_read"] or 0) for r in cache_modelo)
     gravado = sum(int(r["cache_write"] or 0) for r in cache_modelo)
@@ -433,6 +476,18 @@ def _miolo(dados: dict, orcamento: float | None = None) -> str:
                     # Falha não sai de graça: a entrada já foi enviada e cobrada.
                     f"US$ {_fmt(custo_erro, 4)} queimados · {tipos_erro}"
                     if n_erros else "nenhuma"))
+    # O painel já se audita para cobertura e preço; aqui ele se audita para
+    # CUSTO. Um dia 4x acima do típico é o que se quer ver sem procurar.
+    pico = _pico_diario(dados["por_dia"])
+    if pico and pico["pico"]:
+        alertas.append(("warning" if pico["mult"] < 5 else "serious",
+                        "Pico de custo diário",
+                        f"{str(pico['dia'])[5:]} · US$ {_fmt(pico['custo'], 2)}",
+                        f"{_fmt(pico['mult'], 1)}× a mediana diária "
+                        f"(US$ {_fmt(pico['mediana'], 2)}/dia)"))
+    elif pico:
+        alertas.append(("good", "Custo diário", "sem picos no período",
+                        f"mediana US$ {_fmt(pico['mediana'], 2)}/dia"))
 
     ent = dados["por_entidade"]
     unidades = int(ent["unidades"] or 0)
@@ -448,12 +503,19 @@ def _miolo(dados: dict, orcamento: float | None = None) -> str:
     total_imagens = sum(int(x["imagens"] or 0) for x in dados["imagens"])
     custo_imagens = sum(_d(x["custo"]) for x in dados["imagens"])
 
+    ant = dados.get("anterior") or {}
+    var_custo = _variacao(custo, ant.get("custo"))
+    var_chamadas = _variacao(chamadas, ant.get("chamadas"))
+
     def tiles():
-        t = [("Custo total", f"US$ {_fmt(custo, 2)}", _rotulo_periodo(dados["dias"])),
+        t = [("Custo total", f"US$ {_fmt(custo, 2)}",
+              var_custo or _rotulo_periodo(dados["dias"])),
              ("Média diária", f"US$ {_fmt(media_dia, 2)}",
               f"projeção do mês: US$ {_fmt(custo + media_dia * restantes, 2)}"
               if projetar else f"média dos {dados['dias']} dias"),
-             ("Chamadas", _int(chamadas), _int(r["tokens"]) + " tokens")]
+             ("Chamadas", _int(chamadas),
+              f"{_int(r['tokens'])} tokens · {var_chamadas}" if var_chamadas
+              else _int(r["tokens"]) + " tokens")]
         if por_execucao is not None:
             t.append(("Custo por request", f"US$ {_fmt(por_execucao, 4)}",
                       f"{execucoes} execuç(ões) · "
@@ -594,9 +656,9 @@ def _miolo(dados: dict, orcamento: float | None = None) -> str:
           entrada. Este custo está incluído no total acima, sem rótulo próprio.</p>
           {tabela_err}</section>"""
 
-    # ---- segunda dimensão livre (default: material_tipo) -----------------
-    # Tabela, não barra: são dezenas de subtipos e o top-8 de uma barra
-    # esconderia a cauda — que é justamente onde mora "esse tipo custa caro".
+    # ---- segunda dimensão livre (--tag-extra) ---------------------------
+    # Tabela, não barra: pode haver dezenas de valores e o top-8 de uma barra
+    # esconderia a cauda — que é justamente onde mora "esse subtipo custa caro".
     extra_html = ""
     if dados.get("por_extra"):
         linhas_extra = []
@@ -870,12 +932,16 @@ def gerar(store, caminho: str, **kw) -> str:
     orcamento = kw.pop("orcamento", None)
     periodos = kw.pop("periodos", None) or list(PERIODOS_PADRAO)
     inicial = kw.pop("dias", 30)
+    # atualizar_s só tem efeito servido por HTTP (o endpoint da aplicação passa
+    # isto direto para render()); num arquivo local o reload relê o mesmo HTML.
+    atualizar_s = kw.pop("atualizar_s", None)
     # O período inicial sempre existe no seletor, mesmo se vier de fora da lista
     # (`--days 45`): sem isto o botão marcado não teria corpo correspondente.
     janelas = sorted(set(periodos) | {inicial})
     paineis = [coletar(store, dias=d, **kw) for d in janelas]
     from pathlib import Path
     Path(caminho).write_text(
-        render(paineis, titulo=titulo, orcamento=orcamento, inicial=inicial),
+        render(paineis, titulo=titulo, orcamento=orcamento, inicial=inicial,
+               atualizar_s=atualizar_s),
         encoding="utf-8")
     return caminho

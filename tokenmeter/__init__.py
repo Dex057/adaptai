@@ -10,6 +10,7 @@ A partir daí, toda chamada feita com esse client é registrada — sem uma linh
 """
 from __future__ import annotations
 
+import datetime as dt
 import logging
 import time
 from decimal import Decimal
@@ -27,7 +28,7 @@ from .store import Store
 
 __version__ = "0.1.0"
 __all__ = ["configure", "wrap", "context", "tag", "feature", "record", "query", "cost_per_unit",
-           "coverage", "export_csv", "doctor", "migrate", "UsageEvent", "TokenmeterError"]
+           "coverage", "export_csv", "doctor", "migrate", "prune", "UsageEvent", "TokenmeterError"]
 
 log = logging.getLogger("tokenmeter")
 
@@ -70,6 +71,23 @@ def configure(dsn: str, *, service: str, environment: str = "dev",
 
 def migrate() -> None:
     _require().migrate()
+
+
+def prune(*, before: "dt.datetime | None" = None,
+          older_than_days: int | None = None, dry_run: bool = False) -> dict:
+    """Retenção: apaga eventos (e tags) mais antigos que o corte. IRREVERSÍVEL.
+
+    Informe `before` (datetime aware) ou `older_than_days`. `dry_run=True` só
+    conta. A lib não roda isto sozinha — chame de um cron/comando.
+    """
+    st = _require()
+    if older_than_days is not None:
+        before = utcnow() - dt.timedelta(days=older_than_days)
+    if before is None:
+        raise TokenmeterError("prune: informe before= ou older_than_days=")
+    if dry_run:
+        return {"events": st.count_before(before), "tags": None, "dry_run": True}
+    return st.prune(before)
 
 
 def _require() -> Store:

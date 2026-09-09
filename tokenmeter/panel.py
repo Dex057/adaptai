@@ -705,9 +705,15 @@ def _rotulo_periodo(dias: int) -> str:
 
 
 def render(paineis: list[dict], *, titulo: str = "Consumo de IA",
-           orcamento: float | None = None, inicial: int | None = None) -> str:
+           orcamento: float | None = None, inicial: int | None = None,
+           atualizar_s: int | None = None) -> str:
     """Documento completo. `paineis` é uma lista de saídas de `coletar()`, uma
-    por período; a barra de botões alterna entre elas sem nova consulta."""
+    por período; a barra de botões alterna entre elas sem nova consulta.
+
+    `atualizar_s`: se dado, a página se recarrega sozinha nesse intervalo
+    (segundos) via <meta http-equiv=refresh>. O período selecionado sobrevive
+    ao reload (vai no location.hash). Só faz sentido quando servida por HTTP —
+    num arquivo local o reload relê o mesmo HTML."""
     paineis = sorted(paineis, key=lambda d: d["dias"])
     if inicial is None or not any(d["dias"] == inicial for d in paineis):
         inicial = paineis[0]["dias"] if paineis else 30
@@ -730,9 +736,15 @@ def render(paineis: list[dict], *, titulo: str = "Consumo de IA",
         for d in paineis)
 
     gerado = dt.datetime.utcnow().strftime("%d/%m/%Y %H:%M UTC")
+    meta_refresh = (f'<meta http-equiv="refresh" content="{int(atualizar_s)}">'
+                    if atualizar_s and int(atualizar_s) > 0 else "")
+    nota_refresh = (f" · recarrega sozinho a cada {int(atualizar_s) // 60} min"
+                    if atualizar_s and int(atualizar_s) >= 60 else
+                    (f" · recarrega sozinho a cada {int(atualizar_s)}s"
+                     if atualizar_s and int(atualizar_s) > 0 else ""))
     return f"""<!DOCTYPE html>
 <html lang="pt-BR"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1">{meta_refresh}
 <title>{html.escape(titulo)}</title>
 <style>
 :root{{--surface:#fcfcfb;--plane:#f9f9f7;--ink:#0b0b0b;--ink2:#52514e;--muted:#898781;
@@ -811,7 +823,7 @@ border-color:var(--ink);font-weight:600}}
 <button id="tema" type="button" aria-label="Alternar tema claro/escuro">tema</button>
 <h1>{html.escape(titulo)}</h1>
 <p class="sub">Consumo de IA no período selecionado.</p>
-<p class="meta">Gerado em {gerado} · fonte: tabela de eventos do tokenmeter · valores em USD</p>
+<p class="meta">Gerado em {gerado} · fonte: tabela de eventos do tokenmeter · valores em USD{nota_refresh}</p>
 
 <div class="periodos" role="group" aria-label="Período">{botoes}</div>
 

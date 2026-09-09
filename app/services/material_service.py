@@ -276,7 +276,11 @@ RETORNE APENAS O JSON, sem explicações ou markdown."""
                 "error": str(e)
             }
 
-    @tm.feature(F.MATERIAL_ADAPTADO)
+    # tags_from={"formato": "formato"}: sem isso, resumo/roteiro/atividades
+    # caem todos juntos em feature=material_adaptado no tokenmeter — foi por
+    # essa falta de granularidade que o caso do material 23 (2026-09-09) exigiu
+    # cruzar tabelas na mao pra achar o evento real (ver docs do incidente).
+    @tm.feature(F.MATERIAL_ADAPTADO, tags_from={"formato": "formato"})
     def gerar_material_texto(self, formato: str, titulo: str, conteudo: str, materia: str, serie: str, adaptacoes: list = None) -> dict:
         """
         Gera materiais textuais em HTML para os formatos de adaptacao:
@@ -336,9 +340,12 @@ FORMATO DE SAIDA:
         try:
             response = self.client.messages.create(
                 model=self.model,
-                # Mesmo motivo do material visual: "atividades" com gabarito
-                # comentado nao cabia em 4000 tokens.
-                max_tokens=8192,
+                # 2026-09-09: 8192 (motivo original: "atividades" com gabarito
+                # comentado nao cabia em 4000) ainda truncou um caso real em
+                # producao (tm_usage_event: 8192/8192 tokens, stop_reason
+                # max_tokens). Subiu pro mesmo teto que planejamento_bncc_service
+                # ja roda em prod com o mesmo modelo — nao e novidade no repo.
+                max_tokens=16384,
                 messages=[{"role": "user", "content": prompt}]
             )
             html_content = _extrair_texto(response)

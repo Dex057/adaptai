@@ -194,7 +194,13 @@ def gerar_material_background(material_id: int):
             # "Gerando..." indefinidamente, sem erro em lugar nenhum.
             conteudo_erro = f"Tipo de material '{material_tipo}' nao tem gerador implementado."
         
-        print(f"✨ Conteúdo gerado! Atualizando banco...")
+        # 2026-09-09: este print dizia "gerado" mesmo quando `resultado["success"]`
+        # veio False (ex.: resposta cortada em max_tokens) — no Railway o log
+        # parecia caminho feliz do inicio ao fim enquanto o material ia pra ERRO.
+        if conteudo_gerado:
+            print(f"✨ Conteúdo gerado! Atualizando banco...")
+        else:
+            print(f"⚠️ Geração falhou ({conteudo_erro}). Marcando como erro...")
         
         # ETAPA 3: ATUALIZAR BANCO (transação SUPER RÁPIDA - só UPDATE status)
         max_retries = 3
@@ -228,7 +234,10 @@ def gerar_material_background(material_id: int):
                 db_session.commit()
                 db_session.close()
                 
-                print(f"✅ Material {material_id} salvo com sucesso!")
+                if conteudo_gerado:
+                    print(f"✅ Material {material_id} salvo com sucesso!")
+                else:
+                    print(f"❌ Material {material_id} marcado como ERRO: {conteudo_erro}")
                 return
             
             except OperationalError as e:

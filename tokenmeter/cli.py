@@ -54,6 +54,16 @@ def main(argv=None) -> int:
     c.add_argument("--exclude", action="append", default=None,
                    help="pasta/arquivo a ignorar, relativo a --path (repetível)")
 
+    pr = sub.add_parser("prune", help="retenção: apaga eventos antigos (dry-run por padrão)")
+    pr.add_argument("--dsn"); pr.add_argument("--prefix", default="")
+    grp = pr.add_mutually_exclusive_group(required=True)
+    grp.add_argument("--older-than", metavar="Nd|Nm|Ny",
+                     help="apaga o que for mais velho que isso (ex.: 400d, 18m, 2y)")
+    grp.add_argument("--before", metavar="YYYY-MM-DD",
+                     help="apaga occurred_at < esta data (UTC)")
+    pr.add_argument("--apply", action="store_true",
+                    help="executa de fato; sem isto só conta o que seria apagado")
+
     d = sub.add_parser("doctor", help="saúde da ferramenta: preço, cobertura, dead-letter")
     d.add_argument("--dsn"); d.add_argument("--prefix", default="")
     d.add_argument("--service", default="cli"); d.add_argument("--json", action="store_true")
@@ -82,9 +92,10 @@ def main(argv=None) -> int:
     pa.add_argument("--environment", default=None, help="filtra o ambiente (ex.: production)")
     pa.add_argument("--tag-tenant", default="tenant_id",
                     help="qual chave de tag usar como 'cliente' no painel")
-    pa.add_argument("--tag-extra", default="material_tipo",
-                    help="2a dimensao livre, tabelada por atividade (run_id); "
-                         "vazio desativa a secao")
+    pa.add_argument("--tag-extra", default="",
+                    help="chave de tag para um 2o corte, tabelado por execucao "
+                         "(run_id) — ex.: --tag-extra subtype; vazio (padrao) "
+                         "omite a secao")
     pa.add_argument("--budget", type=float, default=None,
                     help="orçamento mensal em USD; ativa a barra de orçamento")
     pa.add_argument("--title", default="Consumo de IA")
@@ -201,6 +212,27 @@ def main(argv=None) -> int:
         tm.configure(_dsn(args), service="cli", table_prefix=args.prefix,
                      migrate_on_start=True, drain_on_start=False)
         print("tokenmeter: schema criado/atualizado")
+        return 0
+
+    if args.cmd == "prune":
+        tm.configure(_dsn(args), service="cli", table_prefix=args.prefix,
+                     drain_on_start=False)
+        if args.before:
+            corte = dt.datetime.fromisoformat(args.before).replace(tzinfo=dt.timezone.utc)
+        else:
+            n, unidade = int(args.older_than[:-1]), args.older_than[-1].lower()
+            dias = {"d": 1, "m": 30, "y": 365}.get(unidade)
+            if not dias:
+                sys.exit(f"erro: --older-than espera Nd|Nm|Ny, recebi {args.older_than!r}")
+            corte = tm.utcnow() - dt.timedelta(days=n * dias)
+        n_apagar = tm._require().count_before(corte)
+        if not args.apply:
+            print(f"tokenmeter prune (dry-run): {n_apagar} evento(s) com "
+                  f"occurred_at < {corte:%Y-%m-%d %H:%M} UTC seriam apagados.")
+            print("passe --apply para executar.")
+            return 0
+        res = tm.prune(before=corte)
+        print(f"tokenmeter prune: {res['events']} evento(s) e {res['tags']} tag(s) apagados.")
         return 0
 
     if args.cmd == "doctor":

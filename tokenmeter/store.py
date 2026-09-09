@@ -11,10 +11,11 @@ from decimal import Decimal
 
 from sqlalchemy import (
     BigInteger, Column, Date, DateTime, ForeignKey, Index, Integer, MetaData,
-    Numeric, SmallInteger, String, Table, Text, create_engine, insert, select,
+    Numeric, SmallInteger, String, Table, Text, create_engine, delete, func,
+    insert, select,
 )
 
-from .event import UsageEvent, utcnow
+from .event import UsageEvent, to_utc_naive, utcnow
 
 log = logging.getLogger("tokenmeter")
 
@@ -148,3 +149,26 @@ class Store:
 
     def connect(self):
         return self.engine.connect()
+
+    def count_before(self, before: dt.datetime) -> int:
+        """Quantos eventos têm occurred_at < before. Para o dry-run do prune."""
+        before = to_utc_naive(before) if before.tzinfo else before
+        with self.engine.connect() as con:
+            return int(con.execute(
+                select(func.count()).select_from(self.ev)
+                .where(self.ev.c.occurred_at < before)).scalar() or 0)
+
+    def prune(self, before: dt.datetime) -> dict:
+        """Apaga eventos (e suas tags) com occurred_at < before. IRREVERSÍVEL.
+
+        Deleta as tags explicitamente antes: o ON DELETE CASCADE da FK só vale
+        com foreign_keys=ON no SQLite e InnoDB no MySQL — não dá para depender.
+        """
+        before = to_utc_naive(before) if before.tzinfo else before
+        antigos = select(self.ev.c.event_id).where(self.ev.c.occurred_at < before)
+        with self.engine.begin() as con:
+            tags = con.execute(
+                delete(self.tag).where(self.tag.c.event_id.in_(antigos))).rowcount
+            evs = con.execute(
+                delete(self.ev).where(self.ev.c.occurred_at < before)).rowcount
+        return {"events": int(evs or 0), "tags": int(tags or 0)}

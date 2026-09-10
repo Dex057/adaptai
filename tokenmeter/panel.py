@@ -44,7 +44,7 @@ def _d(v) -> Decimal:
 
 def coletar(store, *, dias: int = 30, service: str | None = None,
             environment: str | None = None, tag_tenant: str = "tenant_id",
-            tag_extra: str | None = None) -> dict:
+            tag_extra: str | None = None, unidade: str | None = None) -> dict:
     """Roda as agregações. Uma consulta por bloco do painel — nenhuma é pesada."""
     ev = f"{store.ev.name}"
     tg = f"{store.tag.name}"
@@ -77,7 +77,8 @@ def coletar(store, *, dias: int = 30, service: str | None = None,
                        MIN(occurred_at) AS ini, MAX(occurred_at) AS fim
                        FROM {ev} e WHERE {W}""")[0]
         anterior = q(f"""SELECT COUNT(*) AS chamadas,
-                         COALESCE(SUM(cost_usd),0) AS custo
+                         COALESCE(SUM(cost_usd),0) AS custo,
+                         COALESCE(SUM(total_tokens),0) AS tokens
                          FROM {ev} e
                          WHERE e.occurred_at >= :ini_ant AND e.occurred_at < :ini
                          {filtro_extra}""")[0]
@@ -98,6 +99,14 @@ def coletar(store, *, dias: int = 30, service: str | None = None,
                              ON t.event_id = e.event_id AND t.tag_key = :tk
                            WHERE {W} GROUP BY t.tag_value ORDER BY custo DESC""",
                        tk=tag_tenant)
+        # Série diária por tenant, para o sparkline de cada linha da barra.
+        # (a de feature sai de por_dia, que já é por dia+feature.)
+        por_dia_tenant = q(f"""SELECT e.occurred_date AS dia, t.tag_value AS k,
+                               COALESCE(SUM(e.cost_usd),0) AS custo
+                               FROM {ev} e JOIN {tg} t
+                                 ON t.event_id = e.event_id AND t.tag_key = :tk
+                               WHERE {W} GROUP BY e.occurred_date, t.tag_value
+                               ORDER BY e.occurred_date""", tk=tag_tenant)
         # Corte por uma segunda dimensao livre, opcional (--tag-extra). Para
         # quando uma unica feature esconde variacao de custo por subtipo — um
         # gerador que produz N formatos sob a mesma feature, p.ex.
@@ -174,12 +183,34 @@ def coletar(store, *, dias: int = 30, service: str | None = None,
                         COALESCE(SUM(e.priced),0) AS precificadas
                         FROM {ev} e WHERE {W} AND e.operation = 'image_generation'
                         GROUP BY e.model ORDER BY imagens DESC""")
+        # Execuções mais caras: a média por request esconde o outlier. Um run
+        # que disparou 200 chamadas por bug de retry custa 20x um normal e some
+        # no "custo médio". run_id NULL = chamada solta fora de context(), não
+        # entra aqui (não é uma "execução"). MIN(feature): um run tem uma só.
+        top_runs = q(f"""SELECT e.run_id AS run_id, MIN(e.feature) AS feature,
+                         COUNT(*) AS chamadas,
+                         COALESCE(SUM(e.total_tokens),0) AS tokens,
+                         COALESCE(SUM(e.cost_usd),0) AS custo
+                         FROM {ev} e WHERE {W} AND e.run_id IS NOT NULL
+                         GROUP BY e.run_id ORDER BY custo DESC LIMIT 10""")
+        # Custo por unidade de negócio arbitrária (--unit): o mesmo que
+        # por_entidade, mas a chave de tag é escolhida (custo por laudo, por
+        # aluno...). É a métrica-assinatura da lib, que só existia em código.
+        uk = unidade.split(".", 1)[1] if unidade and unidade.startswith("tags.") else unidade
+        por_unidade = q(f"""SELECT COUNT(DISTINCT t.tag_value) AS unidades,
+                            COUNT(*) AS chamadas,
+                            COALESCE(SUM(e.cost_usd),0) AS custo
+                            FROM {ev} e JOIN {tg} t
+                              ON t.event_id = e.event_id AND t.tag_key = :uk
+                            WHERE {W}""", uk=uk)[0] if uk else None
     return {"dias": dias, "resumo": resumo, "anterior": anterior, "por_dia": por_dia,
             "por_feature": por_feature,
             "por_modelo": por_modelo, "por_tenant": por_tenant, "cobertura": cobertura,
             "status": status, "sem_preco": sem_preco, "por_entidade": por_entidade,
             "servicos": servicos, "tag_tenant": tag_tenant,
             "por_extra": por_extra, "tag_extra": tag_extra,
+            "por_dia_tenant": por_dia_tenant,
+            "top_runs": top_runs, "por_unidade_custom": por_unidade, "unidade": uk,
             "tokens_feature": tokens_feature, "latencia": latencia,
             "cache_modelo": cache_modelo, "erros": erros, "por_rota": por_rota,
             "imagens": imagens}
@@ -216,6 +247,37 @@ def _variacao(atual, anterior) -> str:
         return ""
     p = 100 * (float(atual) - a) / a
     return f"{'▲' if p >= 0 else '▼'} {abs(p):.0f}% vs período anterior"
+
+
+def _decompor_custo(atual: dict, anterior: dict) -> dict | None:
+    """Por que o custo mudou vs o período anterior.
+
+    custo = chamadas × (tokens/chamada) × (custo/token). A variação de cada
+    fator diz o que mexeu: mais uso (chamadas), prompt/resposta maior
+    (tokens/chamada), ou preço/mix de modelo (custo/token). Os três se
+    multiplicam de volta na variação total.
+
+    `None` quando não dá para decompor (período anterior sem dado, ou algum
+    fator zero — ex.: só geração de imagem, que não tokeniza) ou quando o
+    custo mexeu menos de 5% (ruído).
+    """
+    c1, k1, u1 = (float(atual.get("chamadas") or 0), float(atual.get("tokens") or 0),
+                  float(atual.get("custo") or 0))
+    c0, k0, u0 = (float(anterior.get("chamadas") or 0), float(anterior.get("tokens") or 0),
+                  float(anterior.get("custo") or 0))
+    if min(c0, c1, k0, k1, u0, u1) <= 0:
+        return None
+    var_total = u1 / u0 - 1
+    if abs(var_total) < 0.05:
+        return None
+    tpc1, tpc0 = k1 / c1, k0 / c0                 # tokens por chamada
+    upt1, upt0 = u1 / k1, u0 / k0                 # custo por token
+    return {
+        "total": var_total,
+        "chamadas": c1 / c0 - 1,
+        "tokens_chamada": tpc1 / tpc0 - 1,
+        "custo_token": upt1 / upt0 - 1,
+    }
 
 
 def _pico_diario(por_dia: list[dict], fator: float = 3.0) -> dict | None:
@@ -371,14 +433,43 @@ def _svg_area(por_dia, feats, cores, proj_por_dia: Decimal, dias_restantes: int)
     return f'<svg viewBox="0 0 {W} {H}" class="chart" role="img">{"".join(out)}</svg>'
 
 
+def _sparkline(valores: list[float], w: int = 64, h: int = 16) -> str:
+    """Mini-série do custo diário de uma linha. Só a forma: sem eixo, sem rótulo.
+    Vazio (ou um ponto só) não desenha nada — não haveria tendência a mostrar."""
+    v = [float(x or 0) for x in valores]
+    if len(v) < 2 or max(v) <= 0:
+        return ""
+    vmax = max(v)
+    pts = " ".join(
+        f"{i / (len(v) - 1) * (w - 2) + 1:.1f},{h - 1 - x / vmax * (h - 2):.1f}"
+        for i, x in enumerate(v))
+    return (f'<svg class="spark" viewBox="0 0 {w} {h}" width="{w}" height="{h}" '
+            f'aria-hidden="true"><polyline points="{pts}"/></svg>')
+
+
+def _serie_diaria(por_dia: list[dict]) -> dict[str, list[float]]:
+    """`[{dia,k,custo}]` -> `{k: [custo por dia, em ordem de data]}`, preenchendo
+    com 0 os dias sem evento daquela chave (senão o sparkline mente a inclinação)."""
+    dias = sorted({str(r["dia"]) for r in por_dia})
+    idx = {d: i for i, d in enumerate(dias)}
+    out: dict[str, list[float]] = {}
+    for r in por_dia:
+        s = out.setdefault(str(r["k"]), [0.0] * len(dias))
+        s[idx[str(r["dia"])]] += float(r["custo"] or 0)
+    return out
+
+
 def _svg_barras(linhas, cores=None, rotulo="", limite=8, *, chave="custo",
-                fmt=None, tt=None, vazio="Sem dados.") -> str:
+                fmt=None, tt=None, vazio="Sem dados.", series=None) -> str:
     """Barras horizontais com rótulo direto — atende a regra de relevo do contraste.
 
     `chave`/`fmt` deixam a mesma barra servir custo (US$) e latência (ms). Para
     grandeza que não é categórica — latência —, passe `cores=None`: a cor vira a
     sequencial única, porque matiz por categoria ali sugeriria um agrupamento
     que não existe.
+
+    `series` (dict k -> lista de custo diário) adiciona um sparkline por linha —
+    mostra QUEM está crescendo, que a barra de total não mostra.
     """
     fmt = fmt or (lambda v: f"US$ {_fmt(_d(v), 4)}")
     tt = tt or (lambda r: f"{r['k']} · {int(r.get('chamadas') or 0)} chamada(s)")
@@ -390,12 +481,15 @@ def _svg_barras(linhas, cores=None, rotulo="", limite=8, *, chave="custo",
     for i, (k, v, dica) in enumerate(dados):
         pct = 100 * v / vmax
         cor = (cores[i % len(cores)] if cores else "var(--seq)")
+        spark = _sparkline(series.get(k, [])) if series else ""
+        cls = "brow spk" if series else "brow"
         linhas_html.append(
-            f'<div class="brow" data-t="{html.escape(dica)}">'
+            f'<div class="{cls}" data-t="{html.escape(dica)}">'
             f'<span class="blabel" title="{html.escape(k)}">{html.escape(k)}</span>'
             f'<span class="btrack"><span class="bfill" style="width:{pct:.1f}%;'
             f'background:{cor}"></span></span>'
-            f'<span class="bval">{html.escape(fmt(v))}</span></div>')
+            + (f'<span class="bspk">{spark}</span>' if series else "")
+            + f'<span class="bval">{html.escape(fmt(v))}</span></div>')
     return f'<div class="bars" aria-label="{html.escape(rotulo)}">{"".join(linhas_html)}</div>'
 
 
@@ -492,6 +586,11 @@ def _miolo(dados: dict, orcamento: float | None = None) -> str:
     ent = dados["por_entidade"]
     unidades = int(ent["unidades"] or 0)
     por_unidade = (_d(ent["custo"]) / unidades) if unidades else None
+
+    # --unit: custo por unidade de negócio escolhida (custo por laudo, por aluno)
+    uc = dados.get("por_unidade_custom")
+    uc_n = int(uc["unidades"] or 0) if uc else 0
+    uc_custo = (_d(uc["custo"]) / uc_n) if uc_n else None
     execucoes = int(r["execucoes"] or 0)
     por_execucao = (custo / execucoes) if execucoes else None
     chamadas = int(r["chamadas"] or 0)
@@ -506,6 +605,8 @@ def _miolo(dados: dict, orcamento: float | None = None) -> str:
     ant = dados.get("anterior") or {}
     var_custo = _variacao(custo, ant.get("custo"))
     var_chamadas = _variacao(chamadas, ant.get("chamadas"))
+    decomp = _decompor_custo(
+        {"chamadas": chamadas, "tokens": r["tokens"], "custo": custo}, ant)
 
     def tiles():
         t = [("Custo total", f"US$ {_fmt(custo, 2)}",
@@ -523,6 +624,10 @@ def _miolo(dados: dict, orcamento: float | None = None) -> str:
         if por_unidade is not None:
             t.append(("Custo por entidade", f"US$ {_fmt(por_unidade, 4)}",
                       f"{unidades} unidade(s) distintas"))
+        if uc_custo is not None:
+            rot = str(dados.get("unidade"))
+            t.append((f"Custo por {rot}", f"US$ {_fmt(uc_custo, 4)}",
+                      f"{uc_n} {rot}(s) distinto(s)"))
         if r["lat_media"] is not None:
             t.append(("Latência média", _ms(r["lat_media"]),
                       f"pior caso: {_ms(r['lat_max'])}"))
@@ -548,9 +653,30 @@ def _miolo(dados: dict, orcamento: float | None = None) -> str:
         f'{html.escape(f)}</span>' for i, f in enumerate(feats_top)) + (
         f'<span class="lg"><i style="background:{OUTROS_VAR}"></i>Outros</span>' if outros else "")
 
+    spark_feat = _serie_diaria(dados["por_dia"])
+    spark_tenant = _serie_diaria(dados.get("por_dia_tenant") or [])
+
     area = _svg_area(dados["por_dia"], feats,
                      SERIES_VAR[:len(feats_top)] + ([OUTROS_VAR] if outros else []),
                      media_dia, restantes)
+
+    # ---- por que o custo mudou vs o período anterior --------------------
+    decomp_html = ""
+    if decomp:
+        def _p(v):
+            return f"{'+' if v >= 0 else '-'}{abs(v) * 100:.0f}%"
+        fatores = [("mais/menos chamadas", decomp["chamadas"]),
+                   ("tokens por chamada", decomp["tokens_chamada"]),
+                   ("custo por token (preço / mix de modelo)", decomp["custo_token"])]
+        itens = "".join(
+            f'<li><b>{_p(v)}</b> {html.escape(nome)}</li>'
+            for nome, v in sorted(fatores, key=lambda x: -abs(x[1])))
+        decomp_html = f"""<section class="card" style="margin-top:14px">
+          <h2>Por que o custo mudou</h2>
+          <p class="sub">Custo = chamadas × tokens/chamada × custo/token. Variação
+          total <b>{_p(decomp['total'])}</b> vs o período anterior, decomposta —
+          os três fatores se multiplicam de volta:</p>
+          <ul class="decomp">{itens}</ul></section>"""
 
     n_dias_com_dado = len({str(x["dia"]) for x in dados["por_dia"]})
     if n_dias_com_dado <= 1:
@@ -684,6 +810,22 @@ def _miolo(dados: dict, orcamento: float | None = None) -> str:
           entre subtipos.</p>
           {tabela_extra}</section>"""
 
+    # ---- execuções mais caras -----------------------------------------
+    runs_html = ""
+    if dados.get("top_runs"):
+        tabela_runs = _tabela(
+            [{"run": str(x["run_id"])[:8], "feature": x["feature"],
+              "chamadas": _int(x["chamadas"]), "tokens": _int(x["tokens"]),
+              "custo": f"US$ {_fmt(_d(x['custo']), 6)}"} for x in dados["top_runs"]],
+            [("run", "run_id"), ("feature", "Feature"), ("chamadas", "Chamadas"),
+             ("tokens", "Tokens"), ("custo", "Custo")])
+        runs_html = f"""<section class="card" style="margin-top:14px">
+          <h2>Execuções mais caras</h2>
+          <p class="sub">Top 10 por custo. Um <code>run_id</code> agrupa as chamadas
+          de um mesmo pipeline; muitas chamadas numa execução só costuma ser fan-out
+          inesperado (retry, laço). A média por request não mostra isto.</p>
+          {tabela_runs}</section>"""
+
     imagens_html = ""
     if dados["imagens"]:
         tabela_img = _tabela(
@@ -703,14 +845,14 @@ def _miolo(dados: dict, orcamento: float | None = None) -> str:
           {tabela_img}</section>"""
 
     return f"""<div class="tiles">{tiles()}</div>
-
+{decomp_html}
 <section class="card"><h2>Custo acumulado por feature</h2>
 <p class="sub">{html.escape(sub_area)}</p>
 {area}<div class="legend">{legenda}</div></section>
 
 <div class="grid2">
 <section class="card"><h2>Por feature</h2><p class="sub">Onde o dinheiro vai.</p>
-{_svg_barras(dados['por_feature'], SERIES_VAR + [OUTROS_VAR], 'custo por feature')}
+{_svg_barras(dados['por_feature'], SERIES_VAR + [OUTROS_VAR], 'custo por feature', series=spark_feat)}
 <details><summary>Ver como tabela</summary>{tabela_feat}</details></section>
 
 <section class="card"><h2>Por modelo</h2>
@@ -742,10 +884,11 @@ def _miolo(dados: dict, orcamento: float | None = None) -> str:
 
 <section class="card" style="margin-top:14px"><h2>Por {html.escape(dados['tag_tenant'])}</h2>
 <p class="sub">Dimensão livre de atribuição.</p>
-{_svg_barras(dados['por_tenant'], SERIES_VAR + [OUTROS_VAR], 'custo por tenant')}</section>
+{_svg_barras(dados['por_tenant'], SERIES_VAR + [OUTROS_VAR], 'custo por tenant', series=spark_tenant)}</section>
 
 {extra_html}
 {servicos_html}
+{runs_html}
 {imagens_html}
 {erros_html}
 
@@ -852,9 +995,15 @@ background:var(--grid)}}
 .sseg{{display:block;height:100%}} .sseg:hover{{filter:brightness(1.12)}}
 .legend b{{font-variant-numeric:tabular-nums;font-weight:600;color:var(--ink)}}
 .brow{{display:grid;grid-template-columns:150px 1fr 96px;gap:10px;align-items:center;padding:5px 0}}
+/* linha com sparkline: coluna extra de 64px antes do valor */
+.brow.spk{{grid-template-columns:150px 1fr 64px 96px}}
+@media(max-width:820px){{.brow.spk{{grid-template-columns:150px 1fr 96px}} .bspk{{display:none}}}}
 .blabel{{color:var(--ink2);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
 .btrack{{background:var(--grid);border-radius:4px;height:14px;overflow:hidden}}
 .bfill{{display:block;height:100%;border-radius:0 4px 4px 0}}
+.bspk{{display:flex;align-items:center}}
+.spark{{display:block}} .spark polyline{{fill:none;stroke:var(--axis);stroke-width:1.25;
+stroke-linejoin:round;stroke-linecap:round}}
 .bval{{text-align:right;font-size:12px;font-variant-numeric:tabular-nums;color:var(--ink)}}
 .alerts{{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px;margin-top:14px}}
 .al{{display:flex;gap:10px;background:var(--surface);border:1px solid var(--border);
@@ -869,6 +1018,8 @@ table{{width:100%;border-collapse:collapse;margin-top:10px;font-size:12px}}
 th,td{{text-align:left;padding:6px 8px;border-bottom:1px solid var(--border)}}
 th{{color:var(--ink2);font-weight:600}} td{{font-variant-numeric:tabular-nums}}
 .vazio{{color:var(--muted);padding:20px 0}}
+.decomp{{margin:8px 0 0;padding-left:18px;font-size:13px;color:var(--ink2)}}
+.decomp li{{margin:3px 0}} .decomp b{{color:var(--ink);font-variant-numeric:tabular-nums}}
 #tt{{position:fixed;pointer-events:none;background:var(--ink);color:var(--surface);
 padding:6px 9px;border-radius:6px;font-size:12px;opacity:0;transition:opacity .1s;z-index:9}}
 /* Seletor de período: botões, não <select>. São poucos e mutuamente exclusivos,

@@ -99,6 +99,14 @@ def coletar(store, *, dias: int = 30, service: str | None = None,
                              ON t.event_id = e.event_id AND t.tag_key = :tk
                            WHERE {W} GROUP BY t.tag_value ORDER BY custo DESC""",
                        tk=tag_tenant)
+        # Série diária por tenant, para o sparkline de cada linha da barra.
+        # (a de feature sai de por_dia, que já é por dia+feature.)
+        por_dia_tenant = q(f"""SELECT e.occurred_date AS dia, t.tag_value AS k,
+                               COALESCE(SUM(e.cost_usd),0) AS custo
+                               FROM {ev} e JOIN {tg} t
+                                 ON t.event_id = e.event_id AND t.tag_key = :tk
+                               WHERE {W} GROUP BY e.occurred_date, t.tag_value
+                               ORDER BY e.occurred_date""", tk=tag_tenant)
         # Corte por uma segunda dimensao livre, opcional (--tag-extra). Para
         # quando uma unica feature esconde variacao de custo por subtipo — um
         # gerador que produz N formatos sob a mesma feature, p.ex.
@@ -201,6 +209,7 @@ def coletar(store, *, dias: int = 30, service: str | None = None,
             "status": status, "sem_preco": sem_preco, "por_entidade": por_entidade,
             "servicos": servicos, "tag_tenant": tag_tenant,
             "por_extra": por_extra, "tag_extra": tag_extra,
+            "por_dia_tenant": por_dia_tenant,
             "top_runs": top_runs, "por_unidade_custom": por_unidade, "unidade": uk,
             "tokens_feature": tokens_feature, "latencia": latencia,
             "cache_modelo": cache_modelo, "erros": erros, "por_rota": por_rota,
@@ -424,14 +433,43 @@ def _svg_area(por_dia, feats, cores, proj_por_dia: Decimal, dias_restantes: int)
     return f'<svg viewBox="0 0 {W} {H}" class="chart" role="img">{"".join(out)}</svg>'
 
 
+def _sparkline(valores: list[float], w: int = 64, h: int = 16) -> str:
+    """Mini-série do custo diário de uma linha. Só a forma: sem eixo, sem rótulo.
+    Vazio (ou um ponto só) não desenha nada — não haveria tendência a mostrar."""
+    v = [float(x or 0) for x in valores]
+    if len(v) < 2 or max(v) <= 0:
+        return ""
+    vmax = max(v)
+    pts = " ".join(
+        f"{i / (len(v) - 1) * (w - 2) + 1:.1f},{h - 1 - x / vmax * (h - 2):.1f}"
+        for i, x in enumerate(v))
+    return (f'<svg class="spark" viewBox="0 0 {w} {h}" width="{w}" height="{h}" '
+            f'aria-hidden="true"><polyline points="{pts}"/></svg>')
+
+
+def _serie_diaria(por_dia: list[dict]) -> dict[str, list[float]]:
+    """`[{dia,k,custo}]` -> `{k: [custo por dia, em ordem de data]}`, preenchendo
+    com 0 os dias sem evento daquela chave (senão o sparkline mente a inclinação)."""
+    dias = sorted({str(r["dia"]) for r in por_dia})
+    idx = {d: i for i, d in enumerate(dias)}
+    out: dict[str, list[float]] = {}
+    for r in por_dia:
+        s = out.setdefault(str(r["k"]), [0.0] * len(dias))
+        s[idx[str(r["dia"])]] += float(r["custo"] or 0)
+    return out
+
+
 def _svg_barras(linhas, cores=None, rotulo="", limite=8, *, chave="custo",
-                fmt=None, tt=None, vazio="Sem dados.") -> str:
+                fmt=None, tt=None, vazio="Sem dados.", series=None) -> str:
     """Barras horizontais com rótulo direto — atende a regra de relevo do contraste.
 
     `chave`/`fmt` deixam a mesma barra servir custo (US$) e latência (ms). Para
     grandeza que não é categórica — latência —, passe `cores=None`: a cor vira a
     sequencial única, porque matiz por categoria ali sugeriria um agrupamento
     que não existe.
+
+    `series` (dict k -> lista de custo diário) adiciona um sparkline por linha —
+    mostra QUEM está crescendo, que a barra de total não mostra.
     """
     fmt = fmt or (lambda v: f"US$ {_fmt(_d(v), 4)}")
     tt = tt or (lambda r: f"{r['k']} · {int(r.get('chamadas') or 0)} chamada(s)")
@@ -443,12 +481,15 @@ def _svg_barras(linhas, cores=None, rotulo="", limite=8, *, chave="custo",
     for i, (k, v, dica) in enumerate(dados):
         pct = 100 * v / vmax
         cor = (cores[i % len(cores)] if cores else "var(--seq)")
+        spark = _sparkline(series.get(k, [])) if series else ""
+        cls = "brow spk" if series else "brow"
         linhas_html.append(
-            f'<div class="brow" data-t="{html.escape(dica)}">'
+            f'<div class="{cls}" data-t="{html.escape(dica)}">'
             f'<span class="blabel" title="{html.escape(k)}">{html.escape(k)}</span>'
             f'<span class="btrack"><span class="bfill" style="width:{pct:.1f}%;'
             f'background:{cor}"></span></span>'
-            f'<span class="bval">{html.escape(fmt(v))}</span></div>')
+            + (f'<span class="bspk">{spark}</span>' if series else "")
+            + f'<span class="bval">{html.escape(fmt(v))}</span></div>')
     return f'<div class="bars" aria-label="{html.escape(rotulo)}">{"".join(linhas_html)}</div>'
 
 
@@ -611,6 +652,9 @@ def _miolo(dados: dict, orcamento: float | None = None) -> str:
         f'<span class="lg"><i style="background:{SERIES_VAR[i % len(SERIES_VAR)]}"></i>'
         f'{html.escape(f)}</span>' for i, f in enumerate(feats_top)) + (
         f'<span class="lg"><i style="background:{OUTROS_VAR}"></i>Outros</span>' if outros else "")
+
+    spark_feat = _serie_diaria(dados["por_dia"])
+    spark_tenant = _serie_diaria(dados.get("por_dia_tenant") or [])
 
     area = _svg_area(dados["por_dia"], feats,
                      SERIES_VAR[:len(feats_top)] + ([OUTROS_VAR] if outros else []),
@@ -808,7 +852,7 @@ def _miolo(dados: dict, orcamento: float | None = None) -> str:
 
 <div class="grid2">
 <section class="card"><h2>Por feature</h2><p class="sub">Onde o dinheiro vai.</p>
-{_svg_barras(dados['por_feature'], SERIES_VAR + [OUTROS_VAR], 'custo por feature')}
+{_svg_barras(dados['por_feature'], SERIES_VAR + [OUTROS_VAR], 'custo por feature', series=spark_feat)}
 <details><summary>Ver como tabela</summary>{tabela_feat}</details></section>
 
 <section class="card"><h2>Por modelo</h2>
@@ -840,7 +884,7 @@ def _miolo(dados: dict, orcamento: float | None = None) -> str:
 
 <section class="card" style="margin-top:14px"><h2>Por {html.escape(dados['tag_tenant'])}</h2>
 <p class="sub">Dimensão livre de atribuição.</p>
-{_svg_barras(dados['por_tenant'], SERIES_VAR + [OUTROS_VAR], 'custo por tenant')}</section>
+{_svg_barras(dados['por_tenant'], SERIES_VAR + [OUTROS_VAR], 'custo por tenant', series=spark_tenant)}</section>
 
 {extra_html}
 {servicos_html}
@@ -951,9 +995,15 @@ background:var(--grid)}}
 .sseg{{display:block;height:100%}} .sseg:hover{{filter:brightness(1.12)}}
 .legend b{{font-variant-numeric:tabular-nums;font-weight:600;color:var(--ink)}}
 .brow{{display:grid;grid-template-columns:150px 1fr 96px;gap:10px;align-items:center;padding:5px 0}}
+/* linha com sparkline: coluna extra de 64px antes do valor */
+.brow.spk{{grid-template-columns:150px 1fr 64px 96px}}
+@media(max-width:820px){{.brow.spk{{grid-template-columns:150px 1fr 96px}} .bspk{{display:none}}}}
 .blabel{{color:var(--ink2);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
 .btrack{{background:var(--grid);border-radius:4px;height:14px;overflow:hidden}}
 .bfill{{display:block;height:100%;border-radius:0 4px 4px 0}}
+.bspk{{display:flex;align-items:center}}
+.spark{{display:block}} .spark polyline{{fill:none;stroke:var(--axis);stroke-width:1.25;
+stroke-linejoin:round;stroke-linecap:round}}
 .bval{{text-align:right;font-size:12px;font-variant-numeric:tabular-nums;color:var(--ink)}}
 .alerts{{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px;margin-top:14px}}
 .al{{display:flex;gap:10px;background:var(--surface);border:1px solid var(--border);

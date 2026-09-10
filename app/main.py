@@ -141,6 +141,21 @@ async def lifespan(app: FastAPI):
             migrate_on_start=not IS_PRODUCTION_STARTUP,
         )
         logger.info("tokenmeter configurado", extra={"tabela": "tm_usage_event"})
+
+        # Retencao: DESLIGADA por padrao (TOKENMETER_RETENTION_DAYS=0). Quando
+        # ligada, sem scheduler no projeto, o prune roda aqui no start - e um
+        # DELETE por range de indice (occurred_at), na maioria dos deploys
+        # apaga 0 linhas. Best-effort: falhar aqui nao derruba nada.
+        dias_ret = settings.TOKENMETER_RETENTION_DAYS
+        if dias_ret and dias_ret > 0:
+            try:
+                res = tm.prune(older_than_days=dias_ret)
+                if res["events"]:
+                    logger.info("tokenmeter prune: %s evento(s) antigos apagados",
+                                res["events"], extra={"retencao_dias": dias_ret})
+            except Exception:
+                logger.warning("tokenmeter prune falhou - segue sem podar",
+                               exc_info=True)
     except Exception:
         logger.warning("tokenmeter nao inicializado - app segue sem tracking de tokens",
                        exc_info=True)

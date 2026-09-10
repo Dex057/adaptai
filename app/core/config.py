@@ -120,6 +120,13 @@ class Settings(BaseSettings):
     # function de proxy na Vercel. Vazio = so Basic Auth (comportamento antigo).
     PAINEL_TOKEN: str = ""
 
+    # Retencao da tabela tm_usage_event: no startup, apaga eventos mais antigos
+    # que isto (dias). 0 = DESLIGADO (padrao) - no volume atual a tabela nao e
+    # problema. Quando for, setar a env var; guardar > 365 (maior periodo do
+    # painel) com folga, tipo 540. ANTES de ligar, exportar o historico
+    # agregado (tokenmeter export). Ver tokenmeter.prune / docs/API.md.
+    TOKENMETER_RETENTION_DAYS: int = 0
+
     # Claude API (Anthropic)
     ANTHROPIC_API_KEY: str = ""
     CLAUDE_MODEL: str = "claude-sonnet-4-6"

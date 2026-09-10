@@ -68,6 +68,14 @@ def main(argv=None) -> int:
     d.add_argument("--dsn"); d.add_argument("--prefix", default="")
     d.add_argument("--service", default="cli"); d.add_argument("--json", action="store_true")
 
+    wt = sub.add_parser("watch", help="exit 1 se o gasto da janela passar do teto (para cron/CI)")
+    wt.add_argument("--dsn"); wt.add_argument("--prefix", default="")
+    wt.add_argument("--max", type=float, required=True, metavar="USD",
+                    help="teto de gasto para a janela, em USD")
+    wt.add_argument("--days", type=int, default=30, help="janela em dias (padrão 30)")
+    wt.add_argument("--service", default=None); wt.add_argument("--environment", default=None)
+    wt.add_argument("--json", action="store_true")
+
     mo = sub.add_parser("models", help="confere os IDs de modelo do repo contra a API e o pricing")
     mo.add_argument("--path", default=".")
     mo.add_argument("--offline", action="store_true", help="não consulta a API do provedor")
@@ -261,6 +269,26 @@ def main(argv=None) -> int:
             print(f"   {k:<10} {v}")
         print(f"dead-letter     : {rep['deadletter_pending']} evento(s) pendentes")
         return 0
+
+    if args.cmd == "watch":
+        from decimal import Decimal
+        tm.configure(_dsn(args), service="cli", table_prefix=args.prefix,
+                     drain_on_start=False)
+        ini = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=args.days)
+        rows = tm.query(start=ini, service=args.service, environment=args.environment)
+        total = sum((Decimal(str(r["cost_usd"] or 0)) for r in rows), Decimal(0))
+        teto = Decimal(str(args.max))
+        excedeu = total > teto
+        pct = float(total / teto * 100) if teto else 0.0
+        if args.json:
+            print(json.dumps({"days": args.days, "cost_usd": str(total),
+                              "max_usd": args.max, "pct": round(pct, 1),
+                              "over_budget": excedeu}))
+        else:
+            print(f"tokenmeter watch: US$ {total:.2f} em {args.days} dia(s) — "
+                  f"{pct:.0f}% de US$ {args.max:.2f}"
+                  + ("  <-- ACIMA DO TETO" if excedeu else ""))
+        return 1 if excedeu else 0
 
     if args.cmd == "panel":
         from .panel import gerar

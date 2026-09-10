@@ -96,6 +96,9 @@ def main(argv=None) -> int:
                     help="chave de tag para um 2o corte, tabelado por execucao "
                          "(run_id) — ex.: --tag-extra subtype; vazio (padrao) "
                          "omite a secao")
+    pa.add_argument("--unit", default="",
+                    help="chave de tag para um tile 'custo por <unit>' "
+                         "(ex.: --unit documento). vazio (padrao) omite")
     pa.add_argument("--budget", type=float, default=None,
                     help="orçamento mensal em USD; ativa a barra de orçamento")
     pa.add_argument("--title", default="Consumo de IA")
@@ -269,7 +272,8 @@ def main(argv=None) -> int:
         caminho = gerar(tm._require(), args.out, dias=args.days, periodos=periodos,
                         service=args.service, environment=args.environment,
                         tag_tenant=args.tag_tenant,
-                        tag_extra=args.tag_extra or None, titulo=args.title,
+                        tag_extra=args.tag_extra or None,
+                        unidade=args.unit or None, titulo=args.title,
                         orcamento=args.budget)
         print(f"tokenmeter: painel gerado -> {caminho}")
         print("abra no navegador. arquivo único, sem servidor, funciona offline.")

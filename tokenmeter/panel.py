@@ -44,7 +44,7 @@ def _d(v) -> Decimal:
 
 def coletar(store, *, dias: int = 30, service: str | None = None,
             environment: str | None = None, tag_tenant: str = "tenant_id",
-            tag_extra: str | None = None) -> dict:
+            tag_extra: str | None = None, unidade: str | None = None) -> dict:
     """Roda as agregações. Uma consulta por bloco do painel — nenhuma é pesada."""
     ev = f"{store.ev.name}"
     tg = f"{store.tag.name}"
@@ -174,12 +174,33 @@ def coletar(store, *, dias: int = 30, service: str | None = None,
                         COALESCE(SUM(e.priced),0) AS precificadas
                         FROM {ev} e WHERE {W} AND e.operation = 'image_generation'
                         GROUP BY e.model ORDER BY imagens DESC""")
+        # Execuções mais caras: a média por request esconde o outlier. Um run
+        # que disparou 200 chamadas por bug de retry custa 20x um normal e some
+        # no "custo médio". run_id NULL = chamada solta fora de context(), não
+        # entra aqui (não é uma "execução"). MIN(feature): um run tem uma só.
+        top_runs = q(f"""SELECT e.run_id AS run_id, MIN(e.feature) AS feature,
+                         COUNT(*) AS chamadas,
+                         COALESCE(SUM(e.total_tokens),0) AS tokens,
+                         COALESCE(SUM(e.cost_usd),0) AS custo
+                         FROM {ev} e WHERE {W} AND e.run_id IS NOT NULL
+                         GROUP BY e.run_id ORDER BY custo DESC LIMIT 10""")
+        # Custo por unidade de negócio arbitrária (--unit): o mesmo que
+        # por_entidade, mas a chave de tag é escolhida (custo por laudo, por
+        # aluno...). É a métrica-assinatura da lib, que só existia em código.
+        uk = unidade.split(".", 1)[1] if unidade and unidade.startswith("tags.") else unidade
+        por_unidade = q(f"""SELECT COUNT(DISTINCT t.tag_value) AS unidades,
+                            COUNT(*) AS chamadas,
+                            COALESCE(SUM(e.cost_usd),0) AS custo
+                            FROM {ev} e JOIN {tg} t
+                              ON t.event_id = e.event_id AND t.tag_key = :uk
+                            WHERE {W}""", uk=uk)[0] if uk else None
     return {"dias": dias, "resumo": resumo, "anterior": anterior, "por_dia": por_dia,
             "por_feature": por_feature,
             "por_modelo": por_modelo, "por_tenant": por_tenant, "cobertura": cobertura,
             "status": status, "sem_preco": sem_preco, "por_entidade": por_entidade,
             "servicos": servicos, "tag_tenant": tag_tenant,
             "por_extra": por_extra, "tag_extra": tag_extra,
+            "top_runs": top_runs, "por_unidade_custom": por_unidade, "unidade": uk,
             "tokens_feature": tokens_feature, "latencia": latencia,
             "cache_modelo": cache_modelo, "erros": erros, "por_rota": por_rota,
             "imagens": imagens}
@@ -492,6 +513,11 @@ def _miolo(dados: dict, orcamento: float | None = None) -> str:
     ent = dados["por_entidade"]
     unidades = int(ent["unidades"] or 0)
     por_unidade = (_d(ent["custo"]) / unidades) if unidades else None
+
+    # --unit: custo por unidade de negócio escolhida (custo por laudo, por aluno)
+    uc = dados.get("por_unidade_custom")
+    uc_n = int(uc["unidades"] or 0) if uc else 0
+    uc_custo = (_d(uc["custo"]) / uc_n) if uc_n else None
     execucoes = int(r["execucoes"] or 0)
     por_execucao = (custo / execucoes) if execucoes else None
     chamadas = int(r["chamadas"] or 0)
@@ -523,6 +549,10 @@ def _miolo(dados: dict, orcamento: float | None = None) -> str:
         if por_unidade is not None:
             t.append(("Custo por entidade", f"US$ {_fmt(por_unidade, 4)}",
                       f"{unidades} unidade(s) distintas"))
+        if uc_custo is not None:
+            rot = str(dados.get("unidade"))
+            t.append((f"Custo por {rot}", f"US$ {_fmt(uc_custo, 4)}",
+                      f"{uc_n} {rot}(s) distinto(s)"))
         if r["lat_media"] is not None:
             t.append(("Latência média", _ms(r["lat_media"]),
                       f"pior caso: {_ms(r['lat_max'])}"))
@@ -684,6 +714,22 @@ def _miolo(dados: dict, orcamento: float | None = None) -> str:
           entre subtipos.</p>
           {tabela_extra}</section>"""
 
+    # ---- execuções mais caras -----------------------------------------
+    runs_html = ""
+    if dados.get("top_runs"):
+        tabela_runs = _tabela(
+            [{"run": str(x["run_id"])[:8], "feature": x["feature"],
+              "chamadas": _int(x["chamadas"]), "tokens": _int(x["tokens"]),
+              "custo": f"US$ {_fmt(_d(x['custo']), 6)}"} for x in dados["top_runs"]],
+            [("run", "run_id"), ("feature", "Feature"), ("chamadas", "Chamadas"),
+             ("tokens", "Tokens"), ("custo", "Custo")])
+        runs_html = f"""<section class="card" style="margin-top:14px">
+          <h2>Execuções mais caras</h2>
+          <p class="sub">Top 10 por custo. Um <code>run_id</code> agrupa as chamadas
+          de um mesmo pipeline; muitas chamadas numa execução só costuma ser fan-out
+          inesperado (retry, laço). A média por request não mostra isto.</p>
+          {tabela_runs}</section>"""
+
     imagens_html = ""
     if dados["imagens"]:
         tabela_img = _tabela(
@@ -746,6 +792,7 @@ def _miolo(dados: dict, orcamento: float | None = None) -> str:
 
 {extra_html}
 {servicos_html}
+{runs_html}
 {imagens_html}
 {erros_html}
 

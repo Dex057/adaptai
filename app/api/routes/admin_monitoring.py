@@ -291,6 +291,7 @@ def obter_painel_uso_ia(
     orcamento: float = None,
     tag_tenant: str = "tenant_id",
     tag_extra: str = "material_tipo",
+    unidade: str = "",
     refresh: bool = False,
     atualizar: int = 300,
     token: str = "",
@@ -311,6 +312,8 @@ def obter_painel_uso_ia(
     - `tag_tenant`: qual tag corta a dimensao livre (default "tenant_id")
     - `tag_extra`: 2a dimensao, tabelada por atividade/custo (default
       "material_tipo"; vazio desativa a secao)
+    - `unidade`: chave de tag para o tile "custo por <unidade>" (ex.:
+      "aluno_id", "material_id"; vazio omite o tile)
     - `refresh=1`: ignora o cache de 5 minutos e regenera na hora
     - `atualizar`: intervalo (s) do auto-reload da pagina; default 300,
       `atualizar=0` desliga. O reload pega dados no maximo 5 min atrasados
@@ -323,7 +326,7 @@ def obter_painel_uso_ia(
     if not token_ok:
         _admin_por_basic(credentials, db)
 
-    chave = (dias, orcamento, tag_tenant, tag_extra, atualizar)
+    chave = (dias, orcamento, tag_tenant, tag_extra, unidade, atualizar)
     agora = time.monotonic()
 
     if not refresh:
@@ -356,7 +359,8 @@ def obter_painel_uso_ia(
 
     janelas = sorted(set(PERIODOS_PADRAO) | {dias})
     paineis = [coletar(store, dias=d, tag_tenant=tag_tenant,
-                       tag_extra=tag_extra or None) for d in janelas]
+                       tag_extra=tag_extra or None, unidade=unidade or None)
+               for d in janelas]
     html = render(paineis, titulo="AdaptAI - consumo de IA",
                   orcamento=orcamento, inicial=dias,
                   atualizar_s=atualizar if atualizar > 0 else None)

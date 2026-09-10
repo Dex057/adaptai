@@ -77,7 +77,8 @@ def coletar(store, *, dias: int = 30, service: str | None = None,
                        MIN(occurred_at) AS ini, MAX(occurred_at) AS fim
                        FROM {ev} e WHERE {W}""")[0]
         anterior = q(f"""SELECT COUNT(*) AS chamadas,
-                         COALESCE(SUM(cost_usd),0) AS custo
+                         COALESCE(SUM(cost_usd),0) AS custo,
+                         COALESCE(SUM(total_tokens),0) AS tokens
                          FROM {ev} e
                          WHERE e.occurred_at >= :ini_ant AND e.occurred_at < :ini
                          {filtro_extra}""")[0]
@@ -237,6 +238,37 @@ def _variacao(atual, anterior) -> str:
         return ""
     p = 100 * (float(atual) - a) / a
     return f"{'▲' if p >= 0 else '▼'} {abs(p):.0f}% vs período anterior"
+
+
+def _decompor_custo(atual: dict, anterior: dict) -> dict | None:
+    """Por que o custo mudou vs o período anterior.
+
+    custo = chamadas × (tokens/chamada) × (custo/token). A variação de cada
+    fator diz o que mexeu: mais uso (chamadas), prompt/resposta maior
+    (tokens/chamada), ou preço/mix de modelo (custo/token). Os três se
+    multiplicam de volta na variação total.
+
+    `None` quando não dá para decompor (período anterior sem dado, ou algum
+    fator zero — ex.: só geração de imagem, que não tokeniza) ou quando o
+    custo mexeu menos de 5% (ruído).
+    """
+    c1, k1, u1 = (float(atual.get("chamadas") or 0), float(atual.get("tokens") or 0),
+                  float(atual.get("custo") or 0))
+    c0, k0, u0 = (float(anterior.get("chamadas") or 0), float(anterior.get("tokens") or 0),
+                  float(anterior.get("custo") or 0))
+    if min(c0, c1, k0, k1, u0, u1) <= 0:
+        return None
+    var_total = u1 / u0 - 1
+    if abs(var_total) < 0.05:
+        return None
+    tpc1, tpc0 = k1 / c1, k0 / c0                 # tokens por chamada
+    upt1, upt0 = u1 / k1, u0 / k0                 # custo por token
+    return {
+        "total": var_total,
+        "chamadas": c1 / c0 - 1,
+        "tokens_chamada": tpc1 / tpc0 - 1,
+        "custo_token": upt1 / upt0 - 1,
+    }
 
 
 def _pico_diario(por_dia: list[dict], fator: float = 3.0) -> dict | None:
@@ -532,6 +564,8 @@ def _miolo(dados: dict, orcamento: float | None = None) -> str:
     ant = dados.get("anterior") or {}
     var_custo = _variacao(custo, ant.get("custo"))
     var_chamadas = _variacao(chamadas, ant.get("chamadas"))
+    decomp = _decompor_custo(
+        {"chamadas": chamadas, "tokens": r["tokens"], "custo": custo}, ant)
 
     def tiles():
         t = [("Custo total", f"US$ {_fmt(custo, 2)}",
@@ -581,6 +615,24 @@ def _miolo(dados: dict, orcamento: float | None = None) -> str:
     area = _svg_area(dados["por_dia"], feats,
                      SERIES_VAR[:len(feats_top)] + ([OUTROS_VAR] if outros else []),
                      media_dia, restantes)
+
+    # ---- por que o custo mudou vs o período anterior --------------------
+    decomp_html = ""
+    if decomp:
+        def _p(v):
+            return f"{'+' if v >= 0 else '-'}{abs(v) * 100:.0f}%"
+        fatores = [("mais/menos chamadas", decomp["chamadas"]),
+                   ("tokens por chamada", decomp["tokens_chamada"]),
+                   ("custo por token (preço / mix de modelo)", decomp["custo_token"])]
+        itens = "".join(
+            f'<li><b>{_p(v)}</b> {html.escape(nome)}</li>'
+            for nome, v in sorted(fatores, key=lambda x: -abs(x[1])))
+        decomp_html = f"""<section class="card" style="margin-top:14px">
+          <h2>Por que o custo mudou</h2>
+          <p class="sub">Custo = chamadas × tokens/chamada × custo/token. Variação
+          total <b>{_p(decomp['total'])}</b> vs o período anterior, decomposta —
+          os três fatores se multiplicam de volta:</p>
+          <ul class="decomp">{itens}</ul></section>"""
 
     n_dias_com_dado = len({str(x["dia"]) for x in dados["por_dia"]})
     if n_dias_com_dado <= 1:
@@ -749,7 +801,7 @@ def _miolo(dados: dict, orcamento: float | None = None) -> str:
           {tabela_img}</section>"""
 
     return f"""<div class="tiles">{tiles()}</div>
-
+{decomp_html}
 <section class="card"><h2>Custo acumulado por feature</h2>
 <p class="sub">{html.escape(sub_area)}</p>
 {area}<div class="legend">{legenda}</div></section>
@@ -916,6 +968,8 @@ table{{width:100%;border-collapse:collapse;margin-top:10px;font-size:12px}}
 th,td{{text-align:left;padding:6px 8px;border-bottom:1px solid var(--border)}}
 th{{color:var(--ink2);font-weight:600}} td{{font-variant-numeric:tabular-nums}}
 .vazio{{color:var(--muted);padding:20px 0}}
+.decomp{{margin:8px 0 0;padding-left:18px;font-size:13px;color:var(--ink2)}}
+.decomp li{{margin:3px 0}} .decomp b{{color:var(--ink);font-variant-numeric:tabular-nums}}
 #tt{{position:fixed;pointer-events:none;background:var(--ink);color:var(--surface);
 padding:6px 9px;border-radius:6px;font-size:12px;opacity:0;transition:opacity .1s;z-index:9}}
 /* Seletor de período: botões, não <select>. São poucos e mutuamente exclusivos,
